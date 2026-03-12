@@ -14,8 +14,15 @@ from pygame.locals import *
 # dA = 0.004; dB = 0.0009; feed =  0.09; k = 0.056;
 # dA = 0.004; dB = 0.0009; feed =  0.1; k = 0.06;
 
+"""
+kernel
+0.05, 0.2, 0.05
+0.2,   -1,  0.2
+0.05, 0.2, 0.05
+"""
 
-kernel = np.array([[0.05, 0.2, 0.05], [0.2, -1, 0.2], [0.05, 0.2, 0.05]])
+# kernel = np.array([[0.05, 0.2, 0.05], [0.2, -1, 0.2], [0.05, 0.2, 0.05]])
+kernel = np.array([[0.104, 0.146, 0.104], [0.146, -1, 0.146], [0.104, 0.146, 0.104]])
 
 
 # https://stackoverflow.com/questions/42014195/rendering-text-with-multiple-lines-in-pygame
