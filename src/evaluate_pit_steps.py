@@ -6,7 +6,7 @@ geometry directly; every case starts from the same random perturbation and then
 changes only reaction terms or slow parameter fields.
 
 Example:
-    python src/evaluate_pit_steps.py --output artifacts/pit_step_eval
+    python3 src/evaluate_pit_steps.py --output artifacts/pit_step_eval
 """
 
 from __future__ import annotations
