@@ -114,7 +114,7 @@ def blit_text(surface, text, pos, font, color=pygame.Color("black")):
         y += word_height  # Start on new row.
 
 
-# Pythonゲームプログラミング　知っておきたい数学と物理の基本
+# Python game programming reference
 class Slider:
     def __init__(self, rect):
         assert isinstance(rect, Rect)
@@ -315,7 +315,7 @@ class DiffusionReaction:
             for s in self.sliders:
                 s.on_click(mouse)
 
-        for i in range(10):
+        for _ in range(10):
             self.calc_step()
 
         self.screen.fill((0, 0, 0))
@@ -358,7 +358,7 @@ Presets:
     def start(self):
         running = True
         while running:
-            for event in pygame.event.get():  # 終了処理
+            for event in pygame.event.get():  # event loop
                 if event.type == QUIT:
                     running = False
                 if event.type == pygame.KEYDOWN:
