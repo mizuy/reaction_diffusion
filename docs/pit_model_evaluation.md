@@ -1,5 +1,7 @@
 # Kudo pit pattern を反応拡散モデルで評価する考え方
 
+> pit pattern（工藤分類）の医学的背景・各 Type の定義・反応拡散モデルとの対応は `docs/pit_pattern_literature.md` にまとめている。
+
 ## 目的
 
 この実験の目的は、pit の幾何模様を外から描くことではなく、反応拡散モデルの数式を変更することで Kudo pit pattern に近い相がどのように生じるかを比較することである。
