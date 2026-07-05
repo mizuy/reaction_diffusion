@@ -59,6 +59,8 @@ pit pattern を反応拡散で扱うことには、単なる図形マッチン�
 
 つまり、pit pattern の morphology（spot・tubular・branching・不整）は、パラメータ（feed / kill、活性化・抑制のバランス、環境不均一性）の変化に応じて Turing 型系が示すパターン遷移として自然に解釈できる。本リポジトリが Gray-Scott モデルの式変更で Type I / III / IV / VI を近似的に再現しようとしているのは、この生物学的知見に沿った妥当なアプローチである。
 
+なお、反応拡散以外の機構（力学的座屈、細胞ベースモデルなど）でも pit pattern は生成できる。反応拡散を用いないモデルの整理とプロトタイプ実装は `docs/non_reaction_diffusion_models.md` を参照。
+
 ## 5. 本リポジトリのモデルとの対応
 
 `src/evaluate_pit_steps.py` の各 config は、上記の理解を踏まえて次のように pit pattern に対応づけられている。
