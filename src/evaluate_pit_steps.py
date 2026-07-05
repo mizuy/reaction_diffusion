@@ -15,7 +15,7 @@ import argparse
 import csv
 import json
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 import cv2
@@ -29,6 +29,19 @@ KERNEL = np.array(
 
 
 @dataclass(frozen=True)
+class EvalRunSettings:
+    """Initial-condition / run settings shared between batch eval and the UI."""
+
+    size: int = 160
+    steps: int = 3500
+    seed: int = 7
+    seed_density: float = 0.035
+
+
+DEFAULT_EVAL_RUN = EvalRunSettings()
+
+
+@dataclass(frozen=True)
 class ModelConfig:
     """One model variant in the evaluation suite."""
 
@@ -39,6 +52,9 @@ class ModelConfig:
     d_a: float = 1.0
     d_b: float = 0.5
     reaction_saturation: float = 0.0
+    # Spatial saturation: q=q_core on flat high-B cores, q=q_tip elsewhere (tips grow).
+    # When reaction_saturation_tip <= 0, use uniform reaction_saturation only.
+    reaction_saturation_tip: float = 0.0
     cubic_damping: float = 0.0
     static_env_scale: float = 0.0
     feed_env_sensitivity: float = 0.0
@@ -48,6 +64,44 @@ class ModelConfig:
     env_diffusion: float = 0.0
     env_source: float = 0.0
     env_decay: float = 0.0
+    # Extra A consumption inside B-rich regions (step1c_b experiment).
+    a_depletion: float = 0.0
+    # Decay applied to flat high-B stripe cores while keeping tips alive.
+    uniform_core_decay: float = 0.0
+    uniform_core_b_min: float = 0.55
+    uniform_core_grad_max: float = 0.035
+    # Refractory R: B residence memory; kills old corridors while tips stay active.
+    #   R_t += refractory_rate * B - refractory_decay * R
+    #   B   += ... - refractory_strength * R * B
+    refractory_rate: float = 0.0
+    refractory_decay: float = 0.0
+    refractory_strength: float = 0.0
+    # Proposal A: fast, far-diffusing local inhibitor H secreted by B.
+    #   H_t = inhibitor_diffusion * lap(H) + inhibitor_source * B - inhibitor_decay * H
+    #   B   += ... - inhibitor_strength * B * H
+    inhibitor_strength: float = 0.0
+    inhibitor_diffusion: float = 0.0
+    inhibitor_source: float = 0.0
+    inhibitor_decay: float = 0.0
+    # Proposal W: bistable plateau pins stripe WIDTH/amplitude away from (f, k).
+    #   B += bistable_strength * B * (1 - B) * (B - bistable_threshold)
+    # Stable states B=0 / B=1, threshold in between; width ~ sqrt(d_b / strength).
+    bistable_strength: float = 0.0
+    bistable_threshold: float = 0.3
+    # Proposal M: global feedback that pins COVERAGE (mean B) to a target.
+    #   feed_eff = feed + coverage_feedback * (coverage_target - mean(B))
+    coverage_feedback: float = 0.0
+    coverage_target: float = 0.0
+    # Polarity P (2D vector) + anisotropic B diffusion (Step 1e prototype).
+    #   P_t = d_p Lap(P) + align * ∇B - decay * P  (then unit direction for D tensor)
+    #   D = d_b n n^T + d_b_across (I - n n^T)  on B only; A stays isotropic.
+    polarity_diffusion: float = 0.0
+    polarity_align_rate: float = 0.0
+    polarity_decay: float = 0.0
+    # Lateral (across-P) B diffusion; 0 = isotropic d_b only.
+    d_b_across: float = 0.0
+    # Blend isotropic vs anisotropic B diffusion (0 = all isotropic, 1 = full aniso).
+    anisotropic_strength: float = 0.0
 
 
 @dataclass
@@ -56,6 +110,10 @@ class StepResult:
     a: np.ndarray
     b: np.ndarray
     c: np.ndarray
+    h: np.ndarray
+    r: np.ndarray
+    p_x: np.ndarray
+    p_y: np.ndarray
     snapshots: list[tuple[int, np.ndarray, np.ndarray, np.ndarray]]
 
 
@@ -124,35 +182,244 @@ def reaction_term(a: np.ndarray, b: np.ndarray, saturation: float) -> np.ndarray
     return ab2 / (1.0 + saturation * (b**2))
 
 
-def calc_step(
-    a: np.ndarray, b: np.ndarray, c: np.ndarray, config: ModelConfig
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    feed, k = effective_parameters(config, c)
-    reaction = reaction_term(a, b, config.reaction_saturation)
+def reaction_term_with_config(
+    a: np.ndarray, b: np.ndarray, config: ModelConfig
+) -> np.ndarray:
+    """Reaction with optional spatial saturation (q_core on flat cores, q_tip on tips)."""
+    ab2 = a * (b**2)
+    if config.reaction_saturation_tip <= 0.0:
+        return reaction_term(a, b, config.reaction_saturation)
 
-    lap_a = cv2.filter2D(a, -1, KERNEL)
-    lap_b = cv2.filter2D(b, -1, KERNEL)
+    core = uniform_core_mask(
+        b, config.uniform_core_b_min, config.uniform_core_grad_max
+    )
+    q = np.where(
+        core,
+        config.reaction_saturation,
+        config.reaction_saturation_tip,
+    ).astype(np.float32)
+    return ab2 / (1.0 + q * (b**2))
 
-    next_a = a + config.d_a * lap_a - reaction + feed * (1.0 - a)
-    next_b = (
-        b
-        + config.d_b * lap_b
-        + reaction
-        - (k + feed) * b
-        - config.cubic_damping * (b**3)
+
+def uniform_core_mask(b: np.ndarray, b_min: float, grad_max: float) -> np.ndarray:
+    """Flat, high-B stripe interiors (low gradient) but not tips (high gradient)."""
+    gy, gx = np.gradient(b)
+    grad = np.sqrt(gx * gx + gy * gy)
+    return (b > b_min) & (grad < grad_max)
+
+
+def uses_polarity(config: ModelConfig) -> bool:
+    """True when polarity field and/or anisotropic B diffusion is active."""
+    return (
+        config.polarity_align_rate > 0.0
+        or config.polarity_diffusion > 0.0
+        or config.d_b_across > 0.0
+        or config.anisotropic_strength > 0.0
     )
 
+
+def make_initial_polarity(size: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
+    """Weak random unit polarity so anisotropy is defined before B gradients exist."""
+    rng = np.random.default_rng(seed + 20_011)
+    angle = rng.uniform(0.0, 2.0 * math.pi, (size, size)).astype(np.float32)
+    return np.cos(angle).astype(np.float32), np.sin(angle).astype(np.float32)
+
+
+def advance_polarity(
+    p_x: np.ndarray,
+    p_y: np.ndarray,
+    b: np.ndarray,
+    config: ModelConfig,
+) -> tuple[np.ndarray, np.ndarray]:
+    if not uses_polarity(config):
+        return p_x, p_y
+
+    lap_px = cv2.filter2D(p_x, -1, KERNEL)
+    lap_py = cv2.filter2D(p_y, -1, KERNEL)
+    gy, gx = np.gradient(b.astype(np.float64))
+    next_px = (
+        p_x
+        + config.polarity_diffusion * lap_px
+        + config.polarity_align_rate * gx.astype(np.float32)
+        - config.polarity_decay * p_x
+    )
+    next_py = (
+        p_y
+        + config.polarity_diffusion * lap_py
+        + config.polarity_align_rate * gy.astype(np.float32)
+        - config.polarity_decay * p_y
+    )
+    return next_px.astype(np.float32), next_py.astype(np.float32)
+
+
+def polarity_direction(
+    p_x: np.ndarray,
+    p_y: np.ndarray,
+    b: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Unit growth direction; falls back to ∇B where |P| is tiny."""
+    gy, gx = np.gradient(b.astype(np.float64))
+    gx = gx.astype(np.float32)
+    gy = gy.astype(np.float32)
+    mag_p = np.sqrt(p_x * p_x + p_y * p_y)
+    mag_g = np.sqrt(gx * gx + gy * gy)
+    weak_p = mag_p < 0.02
+    weak_g = mag_g < 1.0e-6
+    nx = np.where(weak_p & ~weak_g, gx / (mag_g + 1.0e-8), p_x)
+    ny = np.where(weak_p & ~weak_g, gy / (mag_g + 1.0e-8), p_y)
+    nm = np.sqrt(nx * nx + ny * ny) + 1.0e-8
+    return (nx / nm).astype(np.float32), (ny / nm).astype(np.float32)
+
+
+def anisotropic_laplacian(
+    field: np.ndarray,
+    nx: np.ndarray,
+    ny: np.ndarray,
+    d_parallel: float,
+    d_perp: float,
+) -> np.ndarray:
+    """∇·(D∇f) with D = d_parallel n n^T + d_perp (I - n n^T), n = (nx, ny)."""
+    f = field.astype(np.float64)
+    gy, gx = np.gradient(f)
+    gyy, gxy = np.gradient(gy)
+    _, gxx = np.gradient(gx)
+    d2_along = nx.astype(np.float64) ** 2 * gxx + 2.0 * nx * ny * gxy + ny.astype(
+        np.float64
+    ) ** 2 * gyy
+    mx = -ny.astype(np.float64)
+    my = nx.astype(np.float64)
+    d2_across = mx * mx * gxx + 2.0 * mx * my * gxy + my * my * gyy
+    return (d_parallel * d2_along + d_perp * d2_across).astype(np.float32)
+
+
+def advance_reaction_diffusion(
+    a: np.ndarray,
+    b: np.ndarray,
+    c: np.ndarray,
+    h: np.ndarray,
+    r: np.ndarray,
+    p_x: np.ndarray,
+    p_y: np.ndarray,
+    config: ModelConfig,
+    feed: np.ndarray | float,
+    k: np.ndarray | float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """One explicit Euler step given already-resolved feed / kill fields."""
+    # Proposal M: pin coverage (mean B) by biasing the feed term globally.
+    if config.coverage_feedback > 0.0:
+        coverage_error = config.coverage_target - float(b.mean())
+        feed = np.clip(feed + config.coverage_feedback * coverage_error, 0.0, 0.12)
+
+    reaction = reaction_term_with_config(a, b, config)
+
+    lap_a = cv2.filter2D(a, -1, KERNEL)
+    next_p_x, next_p_y = advance_polarity(p_x, p_y, b, config)
+    lap_iso_b = cv2.filter2D(b, -1, KERNEL)
+    if uses_polarity(config) and config.anisotropic_strength > 0.0:
+        nx, ny = polarity_direction(next_p_x, next_p_y, b)
+        d_perp = (
+            config.d_b_across
+            if config.d_b_across > 0.0
+            else config.d_b * 0.4
+        )
+        lap_aniso_b = anisotropic_laplacian(b, nx, ny, 1.0, d_perp / max(config.d_b, 1.0e-6))
+        mix = min(max(config.anisotropic_strength, 0.0), 1.0)
+        lap_b = config.d_b * ((1.0 - mix) * lap_iso_b + mix * lap_aniso_b)
+    else:
+        lap_b = config.d_b * lap_iso_b
+
+    a_consumption = reaction
+    if config.a_depletion > 0.0:
+        # Extra substrate drain proportional to local A and B (step1c_b).
+        a_consumption = a_consumption + config.a_depletion * a * b
+    next_a = a + config.d_a * lap_a - a_consumption + feed * (1.0 - a)
+
+    b_loss = (k + feed) * b + config.cubic_damping * (b**3)
+    if config.uniform_core_decay > 0.0:
+        core = uniform_core_mask(
+            b, config.uniform_core_b_min, config.uniform_core_grad_max
+        )
+        b_loss = b_loss + config.uniform_core_decay * core.astype(np.float32) * b
+    if config.inhibitor_strength > 0.0:
+        b_loss = b_loss + config.inhibitor_strength * b * h
+    if config.refractory_strength > 0.0:
+        # Kill old flat cores using R memory; tips (high |∇B|) stay active.
+        core = uniform_core_mask(
+            b, config.uniform_core_b_min, config.uniform_core_grad_max
+        )
+        b_loss = (
+            b_loss
+            + config.refractory_strength * r * b * core.astype(np.float32)
+        )
+    next_b = b + lap_b + reaction - b_loss
+
+    # Proposal W: bistable plateau pins the B "on" value (and thus stripe width)
+    # at B=1 independent of (f, k). Threshold beta sets the basin boundary.
+    if config.bistable_strength > 0.0:
+        bistable = (
+            config.bistable_strength
+            * b
+            * (1.0 - b)
+            * (b - config.bistable_threshold)
+        )
+        next_b = next_b + bistable
+
+    next_h = h
+    if (
+        config.inhibitor_diffusion > 0.0
+        or config.inhibitor_source > 0.0
+        or config.inhibitor_decay > 0.0
+    ):
+        lap_h = cv2.filter2D(h, -1, KERNEL)
+        next_h = (
+            h
+            + config.inhibitor_diffusion * lap_h
+            + config.inhibitor_source * b
+            - config.inhibitor_decay * h
+        )
+        next_h = np.clip(next_h, 0.0, 10.0)
+
+    next_c = c
     if config.dynamic_env:
         lap_c = cv2.filter2D(c, -1, KERNEL)
         b_centered = b - float(b.mean())
-        c = c + config.env_rate * (
+        next_c = c + config.env_rate * (
             config.env_diffusion * lap_c
             + config.env_source * b_centered
             - config.env_decay * c
         )
-        c = np.clip(c, -3.0, 3.0)
+        next_c = np.clip(next_c, -3.0, 3.0)
 
-    return np.clip(next_a, 0.0, 1.0), np.clip(next_b, 0.0, 1.0), c.astype(np.float32)
+    next_r = r
+    if config.refractory_rate > 0.0 or config.refractory_decay > 0.0:
+        next_r = (
+            r + config.refractory_rate * b - config.refractory_decay * r
+        ).astype(np.float32)
+        next_r = np.clip(next_r, 0.0, 10.0)
+
+    return (
+        np.clip(next_a, 0.0, 1.0),
+        np.clip(next_b, 0.0, 1.0),
+        next_c.astype(np.float32),
+        next_h.astype(np.float32),
+        next_r.astype(np.float32),
+        next_p_x,
+        next_p_y,
+    )
+
+
+def calc_step(
+    a: np.ndarray,
+    b: np.ndarray,
+    c: np.ndarray,
+    h: np.ndarray,
+    r: np.ndarray,
+    p_x: np.ndarray,
+    p_y: np.ndarray,
+    config: ModelConfig,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    feed, k = effective_parameters(config, c)
+    return advance_reaction_diffusion(a, b, c, h, r, p_x, p_y, config, feed, k)
 
 
 def run_model(
@@ -166,6 +433,13 @@ def run_model(
 ) -> StepResult:
     a, b = make_initial_state(size, seed, seed_density)
     c = build_static_environment(size, seed, config.static_env_scale)
+    h = np.zeros((size, size), dtype=np.float32)
+    r = np.zeros((size, size), dtype=np.float32)
+    if uses_polarity(config):
+        p_x, p_y = make_initial_polarity(size, seed)
+    else:
+        p_x = np.zeros((size, size), dtype=np.float32)
+        p_y = np.zeros((size, size), dtype=np.float32)
 
     snapshot_steps = set(np.linspace(0, steps, snapshot_count, dtype=int).tolist())
     snapshots: list[tuple[int, np.ndarray, np.ndarray, np.ndarray]] = []
@@ -173,11 +447,13 @@ def run_model(
         snapshots.append((0, a.copy(), b.copy(), c.copy()))
 
     for step in range(1, steps + 1):
-        a, b, c = calc_step(a, b, c, config)
+        a, b, c, h, r, p_x, p_y = calc_step(a, b, c, h, r, p_x, p_y, config)
         if step in snapshot_steps:
             snapshots.append((step, a.copy(), b.copy(), c.copy()))
 
-    return StepResult(config=config, a=a, b=b, c=c, snapshots=snapshots)
+    return StepResult(
+        config=config, a=a, b=b, c=c, h=h, r=r, p_x=p_x, p_y=p_y, snapshots=snapshots
+    )
 
 
 def normalize_u8(field: np.ndarray) -> np.ndarray:
@@ -263,6 +539,245 @@ def zhang_suen_thin(binary: np.ndarray, max_iterations: int = 120) -> np.ndarray
     return img.astype(bool)
 
 
+# Clockwise 8-neighbor slots around a center pixel (N, NE, E, SE, S, SW, W, NW).
+_RING_OFFSETS = (
+    (-1, 0),
+    (-1, 1),
+    (0, 1),
+    (1, 1),
+    (1, 0),
+    (1, -1),
+    (0, -1),
+    (-1, -1),
+)
+
+
+def skeleton_degree_map(skeleton: np.ndarray) -> np.ndarray:
+    neighbor_kernel = np.ones((3, 3), dtype=np.uint8)
+    neighbors = cv2.filter2D(skeleton.astype(np.uint8), -1, neighbor_kernel)
+    return neighbors.astype(np.int16) - skeleton.astype(np.int16)
+
+
+def _skeleton_neighbors_at(sk: np.ndarray, y: int, x: int) -> list[tuple[int, int]]:
+    h, w = sk.shape
+    return [
+        (y + dy, x + dx)
+        for dy, dx in _RING_OFFSETS
+        if 0 <= y + dy < h and 0 <= x + dx < w and sk[y + dy, x + dx]
+    ]
+
+
+def default_min_branch_arm_length(size: int) -> int:
+    """Minimum corridor length (in skeleton pixels) for each arm of a fork."""
+    return max(4, size // 32)
+
+
+def junction_cluster_labels(sk: np.ndarray) -> tuple[np.ndarray, list[list[tuple[int, int]]]]:
+    """8-connected clusters of skeleton pixels with degree >= 3."""
+    degree = skeleton_degree_map(sk)
+    junction = (sk & (degree >= 3)).astype(np.uint8)
+    count, labels = cv2.connectedComponents(junction, connectivity=8)
+    clusters: list[list[tuple[int, int]]] = []
+    for label in range(1, count):
+        coords = list(zip(*np.where(labels == label)))
+        clusters.append(coords)
+    return labels, clusters
+
+
+def trace_arm_from_cluster_exit(
+    sk: np.ndarray,
+    start: tuple[int, int],
+    cluster_set: set[tuple[int, int]],
+    junction_labels: np.ndarray,
+    own_label: int,
+    *,
+    max_steps: int = 512,
+) -> tuple[int, tuple[int, int]]:
+    """Follow one corridor leaving a junction cluster; return length and end pixel."""
+    h, w = sk.shape
+    cy, cx = start
+    length = 1
+    prev: tuple[int, int] | None = None
+
+    for _ in range(max_steps - 1):
+        degree = skeleton_degree_map(sk)[cy, cx]
+        if degree == 1:
+            break
+        if degree >= 3:
+            end_label = int(junction_labels[cy, cx])
+            if end_label != 0 and end_label != own_label:
+                break
+            if (cy, cx) in cluster_set:
+                break
+
+        nbrs = [
+            (cy + dy, cx + dx)
+            for dy, dx in _RING_OFFSETS
+            if 0 <= cy + dy < h
+            and 0 <= cx + dx < w
+            and sk[cy + dy, cx + dx]
+            and (cy + dy, cx + dx) != prev
+            and (cy + dy, cx + dx) not in cluster_set
+        ]
+        if not nbrs:
+            nbrs = [
+                (cy + dy, cx + dx)
+                for dy, dx in _RING_OFFSETS
+                if 0 <= cy + dy < h
+                and 0 <= cx + dx < w
+                and sk[cy + dy, cx + dx]
+                and (cy + dy, cx + dx) != prev
+            ]
+            if not nbrs or (nbrs[0] in cluster_set and len(nbrs) == 1):
+                break
+        if len(nbrs) != 1:
+            break
+        prev = (cy, cx)
+        cy, cx = nbrs[0]
+        length += 1
+
+    return length, (cy, cx)
+
+
+def cluster_arm_lengths(
+    sk: np.ndarray,
+    cluster: list[tuple[int, int]],
+    junction_labels: np.ndarray,
+    own_label: int,
+    *,
+    max_steps: int = 512,
+) -> list[int]:
+    """Distinct arm lengths leaving a junction cluster along the skeleton."""
+    cluster_set = set(cluster)
+    seen_ends: list[tuple[int, int]] = []
+    lengths: list[int] = []
+
+    for y, x in cluster:
+        for ny, nx in _skeleton_neighbors_at(sk, y, x):
+            if (ny, nx) in cluster_set:
+                continue
+            arm_len, end = trace_arm_from_cluster_exit(
+                sk,
+                (ny, nx),
+                cluster_set,
+                junction_labels,
+                own_label,
+                max_steps=max_steps,
+            )
+            if arm_len <= 0:
+                continue
+            if any(abs(end[0] - ey) <= 1 and abs(end[1] - ex) <= 1 for ey, ex in seen_ends):
+                continue
+            seen_ends.append(end)
+            lengths.append(arm_len)
+
+    return lengths
+
+
+def is_three_arm_junction_cluster(
+    arm_lengths: list[int], *, min_arm_length: int
+) -> bool:
+    """Exactly three distinct arms, each at least min_arm_length along the skeleton."""
+    if len(arm_lengths) != 3:
+        return False
+    return all(length >= min_arm_length for length in arm_lengths)
+
+
+def prune_skeleton_spurs(skeleton: np.ndarray, min_length: int = 4) -> np.ndarray:
+    """Delete short endpoint branches before junction counting."""
+    sk = skeleton.astype(np.uint8).copy()
+    h, w = sk.shape
+    if min_length <= 1:
+        return sk.astype(bool)
+
+    changed = True
+    while changed:
+        changed = False
+        degree = skeleton_degree_map(sk.astype(bool))
+        for y, x in zip(*np.where((sk > 0) & (degree == 1))):
+            path = [(y, x)]
+            cy, cx = y, x
+            prev: tuple[int, int] | None = None
+            while True:
+                nbrs = [
+                    (cy + dy, cx + dx)
+                    for dy, dx in _RING_OFFSETS
+                    if 0 <= cy + dy < h
+                    and 0 <= cx + dx < w
+                    and sk[cy + dy, cx + dx]
+                    and (cy + dy, cx + dx) != prev
+                ]
+                if not nbrs:
+                    break
+                if len(nbrs) > 1:
+                    break
+                ny, nx = nbrs[0]
+                prev, cy, cx = (cy, cx), ny, nx
+                path.append((ny, nx))
+                if skeleton_degree_map(sk.astype(bool))[ny, nx] != 2:
+                    break
+            if len(path) < min_length:
+                for py, px in path:
+                    sk[py, px] = 0
+                changed = True
+    return sk.astype(bool)
+
+
+def prepare_skeleton_topology(
+    skeleton: np.ndarray,
+    *,
+    prune_spurs: int = 4,
+    min_arm_length: int | None = None,
+    max_arm_steps: int = 512,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return (pruned_skeleton, three_way_branch_mask) for metrics and overlays.
+
+    Junction pixels with degree >= 3 are merged into 8-connected clusters. From
+    each cluster, corridors are traced along the skeleton until the next junction
+    cluster or endpoint. A fork is counted only when there are exactly three
+    distinct corridors and each spans at least ``min_arm_length`` pixels.
+    """
+    sk = (
+        prune_skeleton_spurs(skeleton, min_length=prune_spurs)
+        if prune_spurs > 1
+        else skeleton.astype(bool)
+    )
+    if min_arm_length is None:
+        min_arm_length = default_min_branch_arm_length(sk.shape[0])
+
+    junction_labels, clusters = junction_cluster_labels(sk)
+    branch = np.zeros_like(sk, dtype=bool)
+    for label, cluster in enumerate(clusters, start=1):
+        arms = cluster_arm_lengths(
+            sk, cluster, junction_labels, label, max_steps=max_arm_steps
+        )
+        if not is_three_arm_junction_cluster(arms, min_arm_length=min_arm_length):
+            continue
+        for y, x in cluster:
+            branch[y, x] = True
+    return sk, branch
+
+
+def three_way_branch_mask(
+    skeleton: np.ndarray,
+    *,
+    prune_spurs: int = 4,
+    min_arm_length: int | None = None,
+) -> np.ndarray:
+    """Mask of 3-way junction clusters whose three corridors extend along the skeleton."""
+    _, branch = prepare_skeleton_topology(
+        skeleton, prune_spurs=prune_spurs, min_arm_length=min_arm_length
+    )
+    return branch
+
+
+def skeleton_endpoints(skeleton: np.ndarray) -> np.ndarray:
+    neighbor_kernel = np.ones((3, 3), dtype=np.uint8)
+    neighbors = cv2.filter2D(skeleton.astype(np.uint8), -1, neighbor_kernel)
+    neighbors = neighbors.astype(np.int16) - skeleton.astype(np.int16)
+    return skeleton & (neighbors == 1)
+
+
 def component_areas(binary: np.ndarray) -> np.ndarray:
     components, _, stats, _ = cv2.connectedComponentsWithStats(binary.astype(np.uint8), 8)
     if components <= 1:
@@ -291,15 +806,22 @@ def local_density_stats(binary: np.ndarray, tiles: int = 8) -> tuple[float, floa
 
 def measure_pattern(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> dict[str, float]:
     binary = pattern_binary(b)
-    skeleton = zhang_suen_thin(binary)
-
-    neighbor_kernel = np.ones((3, 3), dtype=np.uint8)
-    neighbors = cv2.filter2D(skeleton.astype(np.uint8), -1, neighbor_kernel)
-    neighbors = neighbors.astype(np.int16) - skeleton.astype(np.int16)
+    skeleton, branch_mask = prepare_skeleton_topology(zhang_suen_thin(binary))
 
     skeleton_pixels = int(skeleton.sum())
-    branch_points = int((skeleton & (neighbors >= 3)).sum())
-    endpoints = int((skeleton & (neighbors == 1)).sum())
+    branch_points = int(branch_mask.sum())
+    endpoints = int(skeleton_endpoints(skeleton).sum())
+
+    # Mean length of skeleton runs between junctions/endpoints: this measures
+    # directly "how far a line extends" before it branches or stops.
+    segments = skeleton & ~branch_mask
+    seg_components, _, seg_stats, _ = cv2.connectedComponentsWithStats(
+        segments.astype(np.uint8), 8
+    )
+    if seg_components > 1:
+        mean_segment_length = float(seg_stats[1:, cv2.CC_STAT_AREA].mean())
+    else:
+        mean_segment_length = 0.0
 
     components, labels, stats, _ = cv2.connectedComponentsWithStats(
         skeleton.astype(np.uint8), 8
@@ -324,6 +846,9 @@ def measure_pattern(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> dict[str, fl
     branch_density = branch_points / max(float(skeleton_pixels), 1.0)
     endpoint_density = endpoints / max(float(skeleton_pixels), 1.0)
     long_line_score = longest_component_fraction / max(branch_density + 0.01, 0.01)
+    # High when each component is a short tree (good Type IV), low for isolated
+    # dashes (fragmented but unbranched) or one giant maze.
+    branch_per_component = branch_points / max(float(skeleton_components), 1.0)
     vi_irregularity_score = area_cv + local_density_std + 0.1 * local_density_entropy
 
     return {
@@ -340,6 +865,8 @@ def measure_pattern(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> dict[str, fl
         "endpoint_density": float(endpoint_density),
         "longest_component_fraction": float(longest_component_fraction),
         "long_line_score": float(long_line_score),
+        "mean_segment_length": float(mean_segment_length),
+        "branch_per_component": float(branch_per_component),
         "component_count": float(areas.size),
         "component_area_mean": float(area_mean),
         "component_area_cv": float(area_cv),
@@ -362,15 +889,11 @@ def render_fields(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
 
 def render_skeleton_overlay(b: np.ndarray) -> np.ndarray:
     binary = pattern_binary(b)
-    skeleton = zhang_suen_thin(binary)
+    skeleton, branch_points = prepare_skeleton_topology(zhang_suen_thin(binary))
     base = cv2.cvtColor(normalize_u8(b), cv2.COLOR_GRAY2BGR)
     base[binary] = (80, 80, 80)
 
-    neighbor_kernel = np.ones((3, 3), dtype=np.uint8)
-    neighbors = cv2.filter2D(skeleton.astype(np.uint8), -1, neighbor_kernel)
-    neighbors = neighbors.astype(np.int16) - skeleton.astype(np.int16)
-    branch_points = skeleton & (neighbors >= 3)
-    endpoints = skeleton & (neighbors == 1)
+    endpoints = skeleton_endpoints(skeleton)
 
     base[skeleton] = (255, 255, 255)
     base[endpoints] = (255, 255, 0)
@@ -418,7 +941,7 @@ def save_result_images(result: StepResult, metrics: dict[str, float], output: Pa
         render_skeleton_overlay(result.b),
         [
             "skeleton overlay",
-            "red=branch cyan=end",
+            "red=3-arm fork cyan=end",
             f"components={metrics['skeleton_components']:.0f}",
         ],
     )
@@ -516,6 +1039,61 @@ def build_suite(suite: str) -> list[ModelConfig]:
             cubic_damping=0.018,
         ),
         ModelConfig(
+            name="step1c_a_strong_cubic",
+            description="Step 1b with stronger B^3 damping to slow late-time stripe coarsening.",
+            feed=0.033,
+            k=0.056,
+            reaction_saturation=1.6,
+            cubic_damping=0.028,
+        ),
+        ModelConfig(
+            name="step1c_b_a_depletion",
+            description="Saturated reaction plus extra A consumption in B-rich regions.",
+            feed=0.033,
+            k=0.056,
+            reaction_saturation=1.6,
+            cubic_damping=0.018,
+            a_depletion=0.25,
+        ),
+        ModelConfig(
+            name="step1c_c_uniform_core",
+            description="Saturated reaction plus decay on uniform high-B stripe cores (tips kept).",
+            feed=0.033,
+            k=0.056,
+            reaction_saturation=1.6,
+            cubic_damping=0.018,
+            uniform_core_decay=0.12,
+        ),
+        ModelConfig(
+            name="step1d_pit_iiil_spatial_sat",
+            description=(
+                "Spatial saturation: high q on flat B cores (IIIL body), low q on tips "
+                "for wedge-like branching without global stripe coarsening."
+            ),
+            feed=0.033,
+            k=0.056,
+            reaction_saturation=1.5,
+            reaction_saturation_tip=0.5,
+            cubic_damping=0.018,
+            uniform_core_decay=0.10,
+        ),
+        ModelConfig(
+            name="step1d_b_pit_iiil_spatial_refractory",
+            description=(
+                "step1d spatial sat plus refractory R to cap corridor length and "
+                "slow labyrinth coarsening."
+            ),
+            feed=0.033,
+            k=0.056,
+            reaction_saturation=1.5,
+            reaction_saturation_tip=0.5,
+            cubic_damping=0.018,
+            uniform_core_decay=0.10,
+            refractory_rate=0.035,
+            refractory_decay=0.08,
+            refractory_strength=0.15,
+        ),
+        ModelConfig(
             name="step2_pit_iv_static_environment",
             description="Step 1b plus weak smooth f/k heterogeneity as tissue environment.",
             feed=0.033,
@@ -542,6 +1120,119 @@ def build_suite(suite: str) -> list[ModelConfig]:
             env_source=0.70,
             env_decay=0.08,
         ),
+        ModelConfig(
+            name="step4_pit_iv_inhibitor",
+            description=(
+                "Proposal A: fast far-diffusing local inhibitor H secreted by B. "
+                "Imposes a length scale so tips stall/split into short branches."
+            ),
+            feed=0.033,
+            k=0.056,
+            inhibitor_strength=0.05,
+            inhibitor_diffusion=0.60,
+            inhibitor_source=0.05,
+            inhibitor_decay=0.10,
+        ),
+        ModelConfig(
+            name="step4b_pit_iv_inhibitor_cubic",
+            description=(
+                "Proposal A inhibitor combined with mild B^3 damping; aims for short "
+                "branched trees rather than a space-filling maze."
+            ),
+            feed=0.033,
+            k=0.056,
+            cubic_damping=0.008,
+            inhibitor_strength=0.06,
+            inhibitor_diffusion=0.60,
+            inhibitor_source=0.05,
+            inhibitor_decay=0.10,
+        ),
+        ModelConfig(
+            name="step5_pit_iv_bistable_width",
+            description=(
+                "Proposal W: bistable plateau pins stripe width away from (f, k) "
+                "so variation flows into morphology instead of thickness."
+            ),
+            feed=0.033,
+            k=0.056,
+            bistable_strength=0.10,
+            bistable_threshold=0.22,
+        ),
+        ModelConfig(
+            name="step5b_pit_iv_bistable_inhibitor",
+            description=(
+                "Proposal W + A: pinned width (bistable) plus local inhibitor H "
+                "(pinned spacing); aims for fixed-width short branched worms."
+            ),
+            feed=0.033,
+            k=0.056,
+            bistable_strength=0.10,
+            bistable_threshold=0.22,
+            inhibitor_strength=0.03,
+            inhibitor_diffusion=0.60,
+            inhibitor_source=0.04,
+            inhibitor_decay=0.12,
+        ),
+        ModelConfig(
+            name="step5c_pit_iv_three_channel",
+            description=(
+                "Proposal W + A + M: width (bistable), spacing (inhibitor) and "
+                "coverage (feed feedback) all pinned; topology is the only free channel."
+            ),
+            feed=0.033,
+            k=0.056,
+            bistable_strength=0.10,
+            bistable_threshold=0.22,
+            inhibitor_strength=0.03,
+            inhibitor_diffusion=0.60,
+            inhibitor_source=0.04,
+            inhibitor_decay=0.12,
+            coverage_feedback=0.05,
+            coverage_target=0.30,
+        ),
+        ModelConfig(
+            name="step1e_pit_iv_polarity_aniso",
+            description=(
+                "Polarity P aligned to ∇B plus anisotropic B diffusion: strong along P, "
+                "weak across P to limit lateral stripe coarsening."
+            ),
+            feed=0.033,
+            k=0.056,
+            polarity_diffusion=0.10,
+            polarity_align_rate=0.06,
+            polarity_decay=0.03,
+            d_b_across=0.22,
+            anisotropic_strength=0.45,
+        ),
+        ModelConfig(
+            name="step1e_b_pit_iv_polarity_1c",
+            description="step1c_c uniform core plus polarity/anisotropic B diffusion.",
+            feed=0.033,
+            k=0.056,
+            reaction_saturation=1.6,
+            cubic_damping=0.018,
+            uniform_core_decay=0.12,
+            polarity_diffusion=0.10,
+            polarity_align_rate=0.06,
+            polarity_decay=0.03,
+            d_b_across=0.22,
+            anisotropic_strength=0.0,
+        ),
+        ModelConfig(
+            name="step1e_c_pit_iv_polarity_1d",
+            description="step1d spatial saturation plus polarity/anisotropic B.",
+            feed=0.033,
+            k=0.056,
+            reaction_saturation=1.5,
+            reaction_saturation_tip=0.5,
+            cubic_damping=0.018,
+            uniform_core_decay=0.10,
+            polarity_diffusion=0.10,
+            polarity_align_rate=0.06,
+            polarity_decay=0.03,
+            d_b_across=0.22,
+            anisotropic_strength=0.30,
+        ),
     ]
 
     if suite == "references":
@@ -549,6 +1240,26 @@ def build_suite(suite: str) -> list[ModelConfig]:
     if suite == "steps":
         return steps
     return references + steps
+
+
+def load_eval_case(
+    metrics_path: Path, case_name: str
+) -> tuple[ModelConfig, EvalRunSettings]:
+    """Rebuild a ModelConfig and its run settings from a metrics.json row."""
+    data = json.loads(Path(metrics_path).read_text(encoding="utf-8"))
+    row = next((item for item in data if item.get("name") == case_name), None)
+    if row is None:
+        raise SystemExit(f"case {case_name!r} not found in {metrics_path}")
+
+    valid = {f.name for f in fields(ModelConfig)}
+    config = ModelConfig(**{key: row[key] for key in valid if key in row})
+    settings = EvalRunSettings(
+        size=int(row.get("size", DEFAULT_EVAL_RUN.size)),
+        steps=int(row.get("steps", DEFAULT_EVAL_RUN.steps)),
+        seed=int(row.get("seed", DEFAULT_EVAL_RUN.seed)),
+        seed_density=float(row.get("seed_density", DEFAULT_EVAL_RUN.seed_density)),
+    )
+    return config, settings
 
 
 def parse_args() -> argparse.Namespace:
@@ -561,13 +1272,19 @@ def parse_args() -> argparse.Namespace:
         default=Path("artifacts/pit_step_eval"),
         help="Directory for images and metrics.",
     )
-    parser.add_argument("--size", type=int, default=160, help="Simulation width/height.")
-    parser.add_argument("--steps", type=int, default=3500, help="Simulation steps per case.")
-    parser.add_argument("--seed", type=int, default=7, help="Seed shared by all cases.")
+    parser.add_argument(
+        "--size", type=int, default=DEFAULT_EVAL_RUN.size, help="Simulation width/height."
+    )
+    parser.add_argument(
+        "--steps", type=int, default=DEFAULT_EVAL_RUN.steps, help="Simulation steps per case."
+    )
+    parser.add_argument(
+        "--seed", type=int, default=DEFAULT_EVAL_RUN.seed, help="Seed shared by all cases."
+    )
     parser.add_argument(
         "--seed-density",
         type=float,
-        default=0.035,
+        default=DEFAULT_EVAL_RUN.seed_density,
         help="Fraction of stochastic initial perturbation pixels.",
     )
     parser.add_argument(
