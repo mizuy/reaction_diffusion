@@ -131,6 +131,41 @@ class SweepConfig:
     label_hold_frames: int = 4
     # Initial transient (seed blobs settling into spots) is shown as "forming".
     label_start_step: int = 2000
+    # ---- static spatial heterogeneity of the medium (v3 experiments) ----------
+    # Static multiplicative noise on the diffusion coefficient(s):
+    #   d(x,y) = d * (1 + amp * n(x,y)),  n = unit-variance Gaussian-smoothed noise
+    #   (correlation length ``sigma`` px), clipped to +-diff_noise_clip sigma.
+    diff_noise_amp: float = 0.0
+    diff_noise_sigma: float = 6.0
+    diff_noise_target: str = "a"  # "a" | "b" | "ab" (same field on both)
+    diff_noise_clip: float = 2.0
+    diff_noise_seed: int = 101
+    # Weak anisotropy of the diffusion tensor, mean-preserving:
+    #   D = R(theta) diag(d_par, d_perp) R(theta)^T,  d_par/d_perp = ratio,
+    #   (d_par + d_perp)/2 = d.  theta is either a constant angle ("uniform")
+    #   or a smooth random nematic orientation field ("field", correlation ``aniso_sigma``).
+    aniso_ratio: float = 1.0
+    aniso_mode: str = "field"  # "uniform" | "field"
+    aniso_angle_deg: float = 0.0
+    aniso_sigma: float = 24.0
+    aniso_target: str = "ab"  # "a" | "b" | "ab"
+    aniso_seed: int = 202
+    # Static additive fluctuation of the feed rate: f(x,y) = f(s) + amp * n(x,y).
+    f_noise_amp: float = 0.0
+    f_noise_sigma: float = 12.0
+    f_noise_clip: float = 2.5
+    f_noise_seed: int = 303
+    # Diffusion sub-steps per Euler step (0 = automatic: 2 when the explicit
+    # scheme would be unstable for the largest local coefficient, else 1).
+    diffusion_substeps: int = 0
+
+    @property
+    def heterogeneous(self) -> bool:
+        return (
+            self.diff_noise_amp != 0.0
+            or self.aniso_ratio != 1.0
+            or self.f_noise_amp != 0.0
+        )
 
     def to_json(self) -> dict:
         d = asdict(self)
@@ -185,13 +220,200 @@ def gs_step(
     k: float,
     d_a: float = 1.0,
     d_b: float = 0.5,
+    medium: "Medium | None" = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     ab2 = a * b * b
-    lap_a = cv2.filter2D(a, -1, KERNEL)
-    lap_b = cv2.filter2D(b, -1, KERNEL)
-    next_a = a + d_a * lap_a - ab2 + f * (1.0 - a)
-    next_b = b + d_b * lap_b + ab2 - (k + f) * b
+    if medium is None:
+        diff_a = d_a * cv2.filter2D(a, -1, KERNEL)
+        diff_b = d_b * cv2.filter2D(b, -1, KERNEL)
+        f_eff = f
+    else:
+        diff_a = medium.diffuse_a(a)
+        diff_b = medium.diffuse_b(b)
+        f_eff = f if medium.f_offset is None else f + medium.f_offset
+    next_a = a + diff_a - ab2 + f_eff * (1.0 - a)
+    next_b = b + diff_b + ab2 - (k + f_eff) * b
     return np.clip(next_a, 0.0, 1.0), np.clip(next_b, 0.0, 1.0)
+
+
+# ---------------------------------------------------------------------------
+# static spatial heterogeneity of the medium (v3): variable / anisotropic
+# diffusion tensor and feed-rate fluctuation
+# ---------------------------------------------------------------------------
+
+# Neighbour offsets (dy, dx) of the 3x3 stencil and the pair-weight they use.
+# The repo kernel [[.05,.2,.05],[.2,-1,.2],[.05,.2,.05]] is recovered with
+# w_x = w_y = 0.2, w_pp = w_pm = 0.05; the stencil then approximates 0.3 * Lap.
+_STENCIL = (
+    ((0, 1), "x"), ((0, -1), "x"),
+    ((1, 0), "y"), ((-1, 0), "y"),
+    ((1, 1), "pp"), ((-1, -1), "pp"),   # along (+x, +y) diagonal: (u_xx + 2u_xy + u_yy)/2
+    ((1, -1), "pm"), ((-1, 1), "pm"),   # along (-x, +y) diagonal: (u_xx - 2u_xy + u_yy)/2
+)
+
+
+def _pad1(u: np.ndarray) -> np.ndarray:
+    return cv2.copyMakeBorder(u, 1, 1, 1, 1, cv2.BORDER_REFLECT_101)
+
+
+def tensor_pair_weights(
+    dxx: np.ndarray, dyy: np.ndarray, dxy: np.ndarray
+) -> dict[str, np.ndarray]:
+    """Per-pixel pair weights of the 9-point stencil for the tensor D = [[dxx, dxy], [dxy, dyy]].
+
+    Sum_j w_j (u_j - u_i) then approximates 0.3 * div(D grad u) (the same scale
+    as the repo kernel).  The corner pair share is kept at the isotropic value
+    0.1 * tr(D)/2, so all weights stay >= 0 for d_par/d_perp <= 2.
+    """
+    m = 0.5 * (dxx + dyy)
+    return {
+        "x": (0.3 * dxx - 0.1 * m).astype(np.float32),
+        "y": (0.3 * dyy - 0.1 * m).astype(np.float32),
+        "pp": (0.05 * m + 0.15 * dxy).astype(np.float32),
+        "pm": (0.05 * m - 0.15 * dxy).astype(np.float32),
+    }
+
+
+class VariableStencil:
+    """Conservative 9-point discretisation of div(D(x) grad u) with per-pixel weights.
+
+    Weights are averaged between the two pixels of each pair (flux form), so
+    mass is conserved and the operator reduces exactly to ``d * KERNEL`` for a
+    uniform isotropic medium.  Boundary: BORDER_REFLECT_101 like ``cv2.filter2D``.
+    """
+
+    def __init__(self, weights: dict[str, np.ndarray], substeps: int = 0):
+        h, w = weights["x"].shape
+        self.shape = (h, w)
+        self.w_mid: list[np.ndarray] = []
+        for (dy, dx), key in _STENCIL:
+            wp = _pad1(weights[key])
+            shifted = wp[1 + dy:1 + dy + h, 1 + dx:1 + dx + w]
+            self.w_mid.append((0.5 * (weights[key] + shifted)).astype(np.float32))
+        # Explicit Euler stability of the checkerboard mode: 1 - 4 (w_x + w_y) / n > -1.
+        self.max_pair_sum = float((weights["x"] + weights["y"]).max())
+        if substeps <= 0:
+            substeps = max(1, int(np.ceil(self.max_pair_sum / 0.45)))
+        self.substeps = substeps
+
+    def laplacian(self, u: np.ndarray) -> np.ndarray:
+        h, w = self.shape
+        up = _pad1(u)
+        acc = np.zeros_like(u)
+        for ((dy, dx), _), wm in zip(_STENCIL, self.w_mid):
+            acc += wm * (up[1 + dy:1 + dy + h, 1 + dx:1 + dx + w] - u)
+        return acc
+
+    def increment(self, u: np.ndarray) -> np.ndarray:
+        """Diffusion increment over one unit time step (with sub-steps if needed)."""
+        if self.substeps == 1:
+            return self.laplacian(u)
+        v = u
+        inv = 1.0 / self.substeps
+        for _ in range(self.substeps):
+            v = v + inv * self.laplacian(v)
+        return v - u
+
+
+@dataclass
+class Medium:
+    """Static spatial fields of the medium built from a ``SweepConfig``."""
+
+    d_a: float
+    d_b: float
+    factor_a: np.ndarray | None = None   # multiplicative noise on d_a (None = 1)
+    factor_b: np.ndarray | None = None
+    theta: np.ndarray | None = None      # orientation of d_par (rad), None = isotropic
+    ratio: float = 1.0
+    aniso_target: str = "ab"
+    f_offset: np.ndarray | None = None
+    stencil_a: VariableStencil | None = None
+    stencil_b: VariableStencil | None = None
+
+    def diffuse_a(self, a: np.ndarray) -> np.ndarray:
+        if self.stencil_a is None:
+            return self.d_a * cv2.filter2D(a, -1, KERNEL)
+        return self.stencil_a.increment(a)
+
+    def diffuse_b(self, b: np.ndarray) -> np.ndarray:
+        if self.stencil_b is None:
+            return self.d_b * cv2.filter2D(b, -1, KERNEL)
+        return self.stencil_b.increment(b)
+
+    def describe(self) -> str:
+        parts = []
+        for name, st in (("A", self.stencil_a), ("B", self.stencil_b)):
+            if st is not None:
+                parts.append(f"{name}: max(w_x+w_y)={st.max_pair_sum:.3f} substeps={st.substeps}")
+        if self.f_offset is not None:
+            parts.append(f"f offset in [{self.f_offset.min():+.4f}, {self.f_offset.max():+.4f}]")
+        return "; ".join(parts) if parts else "homogeneous"
+
+
+def _clipped_unit_noise(seed: int, shape: tuple[int, int], sigma: float, clip: float) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    n = smooth_unit_noise(rng, shape, sigma=sigma)
+    return np.clip(n, -clip, clip).astype(np.float32)
+
+
+def orientation_field(seed: int, shape: tuple[int, int], sigma: float) -> np.ndarray:
+    """Smooth random nematic orientation theta(x,y) in [-pi/2, pi/2)."""
+    rng = np.random.default_rng(seed)
+    c = smooth_unit_noise(rng, shape, sigma=sigma)
+    s = smooth_unit_noise(rng, shape, sigma=sigma)
+    return (0.5 * np.arctan2(s, c)).astype(np.float32)
+
+
+def build_medium(cfg: "SweepConfig") -> Medium | None:
+    """Return the static medium, or None when the configuration is homogeneous."""
+    if not cfg.heterogeneous:
+        return None
+    shape = (cfg.size, cfg.size)
+    med = Medium(d_a=cfg.d_a, d_b=cfg.d_b, ratio=cfg.aniso_ratio, aniso_target=cfg.aniso_target)
+
+    if cfg.diff_noise_amp != 0.0:
+        n = _clipped_unit_noise(cfg.diff_noise_seed, shape, cfg.diff_noise_sigma, cfg.diff_noise_clip)
+        factor = (1.0 + cfg.diff_noise_amp * n).astype(np.float32)
+        if "a" in cfg.diff_noise_target:
+            med.factor_a = factor
+        if "b" in cfg.diff_noise_target:
+            med.factor_b = factor
+
+    if cfg.aniso_ratio != 1.0:
+        if cfg.aniso_mode == "uniform":
+            med.theta = np.full(shape, np.deg2rad(cfg.aniso_angle_deg), dtype=np.float32)
+        elif cfg.aniso_mode == "field":
+            med.theta = orientation_field(cfg.aniso_seed, shape, cfg.aniso_sigma)
+        else:
+            raise ValueError(f"unknown aniso_mode {cfg.aniso_mode!r}")
+
+    if cfg.f_noise_amp != 0.0:
+        n = _clipped_unit_noise(cfg.f_noise_seed, shape, cfg.f_noise_sigma, cfg.f_noise_clip)
+        med.f_offset = (cfg.f_noise_amp * n).astype(np.float32)
+
+    ones = np.ones(shape, dtype=np.float32)
+    zeros = np.zeros(shape, dtype=np.float32)
+    for species, d, factor in (("a", cfg.d_a, med.factor_a), ("b", cfg.d_b, med.factor_b)):
+        aniso = med.theta is not None and species in cfg.aniso_target
+        if factor is None and not aniso:
+            continue  # homogeneous isotropic species: keep the exact filter2D path
+        scale = d * (ones if factor is None else factor)
+        if aniso:
+            # mean-preserving: (d_par + d_perp)/2 = 1, d_par/d_perp = ratio
+            delta = (cfg.aniso_ratio - 1.0) / (cfg.aniso_ratio + 1.0)
+            c2, s2 = np.cos(2.0 * med.theta), np.sin(2.0 * med.theta)
+            dxx = scale * (1.0 + delta * c2)
+            dyy = scale * (1.0 - delta * c2)
+            dxy = scale * (delta * s2)
+        else:
+            dxx = dyy = scale
+            dxy = zeros
+        stencil = VariableStencil(tensor_pair_weights(dxx, dyy, dxy), cfg.diffusion_substeps)
+        if species == "a":
+            med.stencil_a = stencil
+        else:
+            med.stencil_b = stencil
+    return med
 
 
 def initial_state(cfg: "SweepConfig") -> tuple[np.ndarray, np.ndarray]:
@@ -436,6 +658,9 @@ def run_sweep(
     """Run the time sweep; call ``on_frame(record, b)`` for every frame."""
     a, b = initial_state(cfg)
     rng = np.random.default_rng(cfg.noise_seed)
+    medium = build_medium(cfg)
+    if medium is not None and log_every:
+        print("medium:", medium.describe(), flush=True)
     frame_steps = np.linspace(0, cfg.total_steps, cfg.frames + 1, dtype=int)[1:]
     frame_set = {int(x): i for i, x in enumerate(frame_steps)}
     smoother = LabelSmoother(cfg.label_hold_frames)
@@ -444,7 +669,7 @@ def run_sweep(
     for step in range(1, cfg.total_steps + 1):
         s = schedule_s(step, cfg.total_steps, cfg.schedule)
         f, k = path_fk(s, cfg.path_start, cfg.path_end)
-        a, b = gs_step(a, b, f, k, cfg.d_a, cfg.d_b)
+        a, b = gs_step(a, b, f, k, cfg.d_a, cfg.d_b, medium)
         b = add_noise(b, cfg.sigma_at(step), rng)
         if step in frame_set:
             m = phase_metrics(b)
@@ -561,6 +786,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--noise-schedule", type=str,
                    help='knots "t:sigma,..." for time-varying noise; "const" = use --noise everywhere')
     p.add_argument("--init-smooth-sigma", type=float, help="smoothing scale of the seed noise (default: repo value)")
+    g = p.add_argument_group("static medium heterogeneity (v3)")
+    g.add_argument("--diff-noise-amp", type=float, default=d.diff_noise_amp,
+                   help="relative amplitude of static noise on the diffusion coefficient (0 = off)")
+    g.add_argument("--diff-noise-sigma", type=float, default=d.diff_noise_sigma, help="its correlation length (px)")
+    g.add_argument("--diff-noise-target", choices=["a", "b", "ab"], default=d.diff_noise_target)
+    g.add_argument("--diff-noise-seed", type=int, default=d.diff_noise_seed)
+    g.add_argument("--aniso-ratio", type=float, default=d.aniso_ratio, help="d_par/d_perp of the diffusion tensor (1 = isotropic)")
+    g.add_argument("--aniso-mode", choices=["uniform", "field"], default=d.aniso_mode,
+                   help="uniform = one global angle, field = smooth random orientation field")
+    g.add_argument("--aniso-angle", type=float, default=d.aniso_angle_deg, help="angle (deg) for --aniso-mode uniform")
+    g.add_argument("--aniso-sigma", type=float, default=d.aniso_sigma, help="orientation-field correlation length (px)")
+    g.add_argument("--aniso-target", choices=["a", "b", "ab"], default=d.aniso_target)
+    g.add_argument("--aniso-seed", type=int, default=d.aniso_seed)
+    g.add_argument("--f-noise-amp", type=float, default=d.f_noise_amp, help="absolute amplitude of static f(x,y) fluctuation")
+    g.add_argument("--f-noise-sigma", type=float, default=d.f_noise_sigma, help="its correlation length (px)")
+    g.add_argument("--f-noise-seed", type=int, default=d.f_noise_seed)
     p.add_argument("--b-max", type=float, default=d.b_display_max, help="B value mapped to the brightest colour")
     p.add_argument("--hold", type=int, default=d.label_hold_frames, help="frames a new label must persist")
     p.add_argument("--crf", type=int, default=22, help="libx264 constant rate factor (lower = larger/better)")
@@ -573,6 +814,11 @@ def build_config(args: argparse.Namespace) -> SweepConfig:
         fps=args.fps, scale=args.scale, noise=args.noise, path_start=args.path_start,
         path_end=args.path_end, b_display_max=args.b_max, label_hold_frames=args.hold,
         init_smooth_sigma=args.init_smooth_sigma,
+        diff_noise_amp=args.diff_noise_amp, diff_noise_sigma=args.diff_noise_sigma,
+        diff_noise_target=args.diff_noise_target, diff_noise_seed=args.diff_noise_seed,
+        aniso_ratio=args.aniso_ratio, aniso_mode=args.aniso_mode, aniso_angle_deg=args.aniso_angle,
+        aniso_sigma=args.aniso_sigma, aniso_target=args.aniso_target, aniso_seed=args.aniso_seed,
+        f_noise_amp=args.f_noise_amp, f_noise_sigma=args.f_noise_sigma, f_noise_seed=args.f_noise_seed,
     )
     cfg.schedule, cfg.noise_schedule = PRESETS[args.preset]
     cfg.schedule = list(cfg.schedule)
