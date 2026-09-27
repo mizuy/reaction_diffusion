@@ -96,9 +96,45 @@ NOISE_SCHEDULE_V2: list[tuple[float, float]] = [
 # classifier is not meaningful on a noise-dominated field.
 TRANSITION_SIGMA = 0.012
 DEFAULT_SCHEDULE = SCHEDULE_V2
-PRESETS = {
-    "v1": (SCHEDULE_V1, NOISE_SCHEDULE_V1),
-    "v2": (SCHEDULE_V2, NOISE_SCHEDULE_V2),
+
+# v3 "diffratio": same GS step with dB/dA = 0.40 instead of 0.50.  At matched
+# labyrinth coverage (~0.54) the strict 3-arm junction count is ~1.5x that of
+# dB/dA = 0.50 (internal/gs-sweep-experiments/exp11_*).  The phase boundaries
+# shift to lower f, so the path is re-fitted (exp12_*); the Type III window is
+# narrower (s=0.40 converts too slowly, 0.42 coarsens), hence s=0.41.
+PATH_V3_DIFFRATIO = ((0.023, 0.061), (0.0398, 0.0574))
+SCHEDULE_V3_DIFFRATIO: list[tuple[float, float]] = [
+    (0.00, 0.00),
+    (0.10, 0.00),  # Type I dwell
+    (0.20, 0.41),
+    (0.55, 0.41),  # Type III dwell (short worms)
+    (0.65, 0.75),
+    (0.77, 0.75),  # Type IV branching dwell (labyrinth, coverage ~0.55)
+    (0.86, 0.95),
+    (1.00, 0.95),  # Type IV villous dwell (inverted holes)
+]
+NOISE_SCHEDULE_V3_DIFFRATIO: list[tuple[float, float]] = [
+    (0.00, 0.010),
+    (0.10, 0.010),
+    (0.12, 0.003),
+    (0.55, 0.003),
+    (0.58, 0.020),
+    (0.63, 0.020),
+    (0.65, 0.003),
+    (1.00, 0.003),
+]
+
+# Named presets: SweepConfig field overrides applied before explicit CLI options.
+PRESETS: dict[str, dict] = {
+    "v1": {"schedule": SCHEDULE_V1, "noise_schedule": NOISE_SCHEDULE_V1},
+    "v2": {"schedule": SCHEDULE_V2, "noise_schedule": NOISE_SCHEDULE_V2},
+    "v3-diffratio": {
+        "schedule": SCHEDULE_V3_DIFFRATIO,
+        "noise_schedule": NOISE_SCHEDULE_V3_DIFFRATIO,
+        "d_b": 0.40,
+        "path_start": PATH_V3_DIFFRATIO[0],
+        "path_end": PATH_V3_DIFFRATIO[1],
+    },
 }
 
 
@@ -553,10 +589,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fps", type=int, default=d.fps)
     p.add_argument("--scale", type=int, default=d.scale, help="integer upscale of the field for display")
     p.add_argument("--noise", type=float, default=d.noise, help="additive noise sigma on B per step")
-    p.add_argument("--path-start", type=parse_pair, default=d.path_start, metavar="f,k")
-    p.add_argument("--path-end", type=parse_pair, default=d.path_end, metavar="f,k")
+    p.add_argument("--d-a", type=float, help=f"diffusion coefficient of A (default {d.d_a})")
+    p.add_argument("--d-b", type=float, help=f"diffusion coefficient of B (default {d.d_b}; v3-diffratio preset uses 0.40)")
+    p.add_argument("--path-start", type=parse_pair, metavar="f,k", help=f"default {d.path_start}")
+    p.add_argument("--path-end", type=parse_pair, metavar="f,k", help=f"default {d.path_end}")
     p.add_argument("--preset", choices=sorted(PRESETS), default="v2",
-                   help="named (schedule, noise schedule) pair; v1 = non-monotone overshoot, v2 = monotone + noise burst")
+                   help="named parameter set; v1 = non-monotone overshoot, v2 = monotone + noise burst, "
+                        "v3-diffratio = v2 recipe with dB/dA=0.40 and a re-fitted path")
     p.add_argument("--schedule", type=str, help='knots "t:s,t:s,..." (t,s in [0,1]); flat segments = dwell')
     p.add_argument("--noise-schedule", type=str,
                    help='knots "t:sigma,..." for time-varying noise; "const" = use --noise everywhere')
@@ -570,13 +609,17 @@ def parse_args() -> argparse.Namespace:
 def build_config(args: argparse.Namespace) -> SweepConfig:
     cfg = SweepConfig(
         size=args.size, seed=args.seed, total_steps=args.steps, frames=args.frames,
-        fps=args.fps, scale=args.scale, noise=args.noise, path_start=args.path_start,
-        path_end=args.path_end, b_display_max=args.b_max, label_hold_frames=args.hold,
+        fps=args.fps, scale=args.scale, noise=args.noise,
+        b_display_max=args.b_max, label_hold_frames=args.hold,
         init_smooth_sigma=args.init_smooth_sigma,
     )
-    cfg.schedule, cfg.noise_schedule = PRESETS[args.preset]
-    cfg.schedule = list(cfg.schedule)
-    cfg.noise_schedule = None if cfg.noise_schedule is None else list(cfg.noise_schedule)
+    for key, value in PRESETS[args.preset].items():
+        if key in ("schedule", "noise_schedule") and value is not None:
+            value = list(value)
+        setattr(cfg, key, value)
+    for key in ("d_a", "d_b", "path_start", "path_end"):
+        if getattr(args, key) is not None:
+            setattr(cfg, key, getattr(args, key))
     if args.schedule:
         cfg.schedule = parse_schedule(args.schedule)
     if args.noise_schedule:
