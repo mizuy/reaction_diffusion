@@ -17,3 +17,8 @@ exp4:
 
 short:
 	${PYTHON} src/short.py
+
+sweep-video:
+	${PYTHON} src/sweep_video.py --out artifacts/pit-sweep/pit-sweep.mp4 \
+		--phases-out artifacts/pit-sweep/pit-sweep-phases.png \
+		--metrics-out artifacts/pit-sweep/pit-sweep-metrics.csv
