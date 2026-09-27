@@ -10,7 +10,10 @@ model (same kernel, dA/dB and explicit Euler dt=1 as ``evaluate_pit_steps``):
 What changes over time is only the position ``s`` on one straight parameter
 path ``(f, k)(s) = P0 + s (P1 - P0)``.  ``s(t)`` is a piecewise-linear schedule
 (knots ``(t_frac, s)``) so the sweep can dwell inside narrow windows such as
-the finite-worm (Type III) regime.  Each frame is classified into
+the finite-worm (Type III) regime.  The additive noise amplitude may also
+follow a schedule ``sigma(t)``; the v2 preset uses a short strong burst while
+ramping into the labyrinth window to erase the lattice orientation memory
+(see ``--preset``).  Each frame is classified into
 {uniform, spots, worm, labyrinth, holes} from the Euler number of the Otsu
 binary image, component elongation and coverage, and mapped to Kudo-like
 labels (Type I / Type III / Type IV branching / Type IV villous).
@@ -34,22 +37,21 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from evaluate_pit_steps import KERNEL, make_initial_state  # noqa: E402
+from evaluate_pit_steps import KERNEL, make_initial_state, smooth_unit_noise  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
 # configuration
 # ---------------------------------------------------------------------------
 
-# Default schedule (t_frac, s) with four dwell plateaus.
+# v1 schedule (t_frac, s), non-monotone.
 #
 # The hexagonal spot lattice formed at s=0 is metastable up to s~0.45, where
-# the worm regime is already long-wormed, so the schedule overshoots to
-# s=0.47 (spots start to elongate) and then steps back to s=0.35, where the
-# freshly formed stripes break up into short finite dashes that stay
-# stationary ("quench and anneal").  Holes need s~0.94 to nucleate quickly;
-# s>=1.0 floods to uniform B, so the sweep ends at 0.94.
-DEFAULT_SCHEDULE: list[tuple[float, float]] = [
+# the worm regime is already long-wormed, so v1 overshoots to s=0.47 (spots
+# start to elongate) and then steps back to s=0.35, where the freshly formed
+# stripes break up into short finite dashes ("quench and anneal").  Holes need
+# s~0.94 to nucleate quickly; s>=1.0 floods to uniform B, so the sweep ends at 0.94.
+SCHEDULE_V1: list[tuple[float, float]] = [
     (0.00, 0.00),
     (0.14, 0.00),  # Type I dwell (hex spots)
     (0.22, 0.47),
@@ -61,6 +63,43 @@ DEFAULT_SCHEDULE: list[tuple[float, float]] = [
     (0.84, 0.94),
     (1.00, 0.94),  # Type IV villous dwell (inverted hex holes)
 ]
+NOISE_SCHEDULE_V1 = None  # constant sigma = 0.003
+
+# v2 schedule: monotone s(t).  A direct ramp to s=0.40 followed by a dwell lets
+# the lattice convert into short worms without the overshoot (6/6 seeds in
+# internal/gs-sweep-experiments/exp7_*), especially when the Type I lattice is
+# kept slightly disordered by stronger noise during its formation.
+SCHEDULE_V2: list[tuple[float, float]] = [
+    (0.00, 0.00),
+    (0.12, 0.00),  # Type I dwell (spots, sigma=0.010 keeps the lattice disordered)
+    (0.24, 0.40),
+    (0.54, 0.40),  # Type III dwell (short worms; conversion takes ~10k steps)
+    (0.64, 0.66),
+    (0.76, 0.66),  # Type IV branching dwell (labyrinth)
+    (0.85, 0.94),
+    (1.00, 0.94),  # Type IV villous dwell (inverted hex holes)
+]
+# v2 noise sigma(t): strong noise only while ramping into the labyrinth window,
+# which erases the lattice orientation memory so the labyrinth re-nucleates
+# isotropically (meandering, gyrus-like) instead of as parallel stripes.
+NOISE_SCHEDULE_V2: list[tuple[float, float]] = [
+    (0.00, 0.010),
+    (0.12, 0.010),
+    (0.14, 0.003),
+    (0.54, 0.003),
+    (0.57, 0.020),
+    (0.62, 0.020),
+    (0.64, 0.003),
+    (1.00, 0.003),
+]
+# Frames simulated under sigma above this are captioned "(transition)": the
+# classifier is not meaningful on a noise-dominated field.
+TRANSITION_SIGMA = 0.012
+DEFAULT_SCHEDULE = SCHEDULE_V2
+PRESETS = {
+    "v1": (SCHEDULE_V1, NOISE_SCHEDULE_V1),
+    "v2": (SCHEDULE_V2, NOISE_SCHEDULE_V2),
+}
 
 
 @dataclass
@@ -77,7 +116,14 @@ class SweepConfig:
     )
     total_steps: int = 120_000
     noise: float = 0.003
+    # Optional time-varying noise sigma(t) as knots (t_frac, sigma); overrides ``noise``.
+    noise_schedule: list[tuple[float, float]] | None = field(
+        default_factory=lambda: list(NOISE_SCHEDULE_V2)
+    )
     noise_seed: int = 11
+    # Initial condition: Gaussian smoothing scale of the seed noise (None -> repo
+    # default max(1.5, size/80)).  Smaller values give a more disordered seed field.
+    init_smooth_sigma: float | None = None
     frames: int = 1500
     fps: int = 30
     scale: int = 3
@@ -91,7 +137,14 @@ class SweepConfig:
         d["path_start"] = list(self.path_start)
         d["path_end"] = list(self.path_end)
         d["schedule"] = [list(x) for x in self.schedule]
+        if self.noise_schedule is not None:
+            d["noise_schedule"] = [list(x) for x in self.noise_schedule]
         return d
+
+    def sigma_at(self, step: int) -> float:
+        if self.noise_schedule is None:
+            return self.noise
+        return schedule_s(step, self.total_steps, self.noise_schedule)
 
 
 def parse_schedule(text: str) -> list[tuple[float, float]]:
@@ -141,6 +194,24 @@ def gs_step(
     return np.clip(next_a, 0.0, 1.0), np.clip(next_b, 0.0, 1.0)
 
 
+def initial_state(cfg: "SweepConfig") -> tuple[np.ndarray, np.ndarray]:
+    """Repo initial condition (``make_initial_state``) with optional custom smoothing scale."""
+    if cfg.init_smooth_sigma is None:
+        return make_initial_state(cfg.size, cfg.seed, cfg.seed_density)
+    rng = np.random.default_rng(cfg.seed)
+    h = w = cfg.size
+    a = np.ones((h, w), dtype=np.float32)
+    b = np.zeros((h, w), dtype=np.float32)
+    noise = smooth_unit_noise(rng, (h, w), sigma=cfg.init_smooth_sigma)
+    threshold = float(np.quantile(noise, 1.0 - cfg.seed_density))
+    seeds = noise > threshold
+    b[seeds] = 0.85
+    a[seeds] = 0.25
+    a += 0.02 * rng.normal(0.0, 1.0, (h, w)).astype(np.float32)
+    b += 0.02 * rng.normal(0.0, 1.0, (h, w)).astype(np.float32)
+    return np.clip(a, 0.0, 1.0), np.clip(b, 0.0, 1.0)
+
+
 def add_noise(b: np.ndarray, sigma: float, rng: np.random.Generator) -> np.ndarray:
     if sigma <= 0.0:
         return b
@@ -153,6 +224,7 @@ def add_noise(b: np.ndarray, sigma: float, rng: np.random.Generator) -> np.ndarr
 
 PHASE_LABELS = {
     "forming": "(pattern forming)",
+    "transition": "(transition: noise burst)",
     "uniform": "uniform (no pattern)",
     "spots": "Type I  (round pits)",
     "worm": "Type III  (tubular pits)",
@@ -201,43 +273,46 @@ def phase_metrics(b: np.ndarray) -> dict[str, float]:
     else:
         largest_fg_fraction = 0.0
 
-    # Elongation of bright components: minAreaRect aspect, area weighted median.
-    aspects: list[float] = []
-    weights: list[float] = []
-    if n_fg > 0:
-        contours, _ = cv2.findContours(
-            fg.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-        for cnt in contours:
-            area = cv2.contourArea(cnt)
-            if area < min_area:
-                continue
-            (_, _), (w, h), _ = cv2.minAreaRect(cnt)
-            lo, hi = min(w, h), max(w, h)
-            aspects.append(hi / max(lo, 1.0))
-            weights.append(area)
-    if aspects:
-        order = np.argsort(aspects)
-        cw = np.cumsum(np.asarray(weights)[order])
-        aspect_median = float(np.asarray(aspects)[order][np.searchsorted(cw, cw[-1] / 2)])
-    else:
-        aspect_median = 1.0
-
     out.update(
         coverage=coverage, n_fg=n_fg, n_bg=n_bg, euler=euler,
         euler_ratio=euler_ratio, largest_fg_fraction=largest_fg_fraction,
-        aspect_median=aspect_median,
+        aspect_median=_aspect_median(fg, min_area) if n_fg > 0 else 1.0,
+        dark_aspect_median=_aspect_median(bg, min_area) if n_bg > 0 else 1.0,
     )
     out["phase_id"] = classify_phase(out)
     return out
+
+
+def _aspect_median(mask: np.ndarray, min_area: int) -> float:
+    """Area-weighted median of minAreaRect aspect ratios of the mask's components."""
+    aspects: list[float] = []
+    weights: list[float] = []
+    contours, _ = cv2.findContours(
+        mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < min_area:
+            continue
+        (_, _), (w, h), _ = cv2.minAreaRect(cnt)
+        lo, hi = min(w, h), max(w, h)
+        aspects.append(hi / max(lo, 1.0))
+        weights.append(area)
+    if not aspects:
+        return 1.0
+    order = np.argsort(aspects)
+    cw = np.cumsum(np.asarray(weights)[order])
+    return float(np.asarray(aspects)[order][np.searchsorted(cw, cw[-1] / 2)])
 
 
 def classify_phase(m: dict[str, float]) -> str:
     if m.get("b_std", 1.0) < 0.02:
         return "uniform"
     r = m["euler_ratio"]
-    if r < -0.5 and m["n_bg"] >= 6:
-        return "holes"  # dark islands on bright ground: figure/ground inverted
+    if r < -0.5 and m["n_bg"] >= 6 and m.get("dark_aspect_median", 1.0) < 1.6:
+        # Round dark islands on a bright connected ground: figure/ground inverted.
+        # (A bright network with elongated dark grooves is still a labyrinth.)
+        return "holes"
     if r > 0.5 and m["largest_fg_fraction"] < 0.35:
         return "worm" if m["aspect_median"] >= 1.9 else "spots"
     return "labyrinth"
@@ -359,7 +434,7 @@ def run_sweep(
     log_every: int = 100,
 ) -> list[FrameRecord]:
     """Run the time sweep; call ``on_frame(record, b)`` for every frame."""
-    a, b = make_initial_state(cfg.size, cfg.seed, cfg.seed_density)
+    a, b = initial_state(cfg)
     rng = np.random.default_rng(cfg.noise_seed)
     frame_steps = np.linspace(0, cfg.total_steps, cfg.frames + 1, dtype=int)[1:]
     frame_set = {int(x): i for i, x in enumerate(frame_steps)}
@@ -370,11 +445,17 @@ def run_sweep(
         s = schedule_s(step, cfg.total_steps, cfg.schedule)
         f, k = path_fk(s, cfg.path_start, cfg.path_end)
         a, b = gs_step(a, b, f, k, cfg.d_a, cfg.d_b)
-        b = add_noise(b, cfg.noise, rng)
+        b = add_noise(b, cfg.sigma_at(step), rng)
         if step in frame_set:
             m = phase_metrics(b)
             raw = str(m.pop("phase_id"))
-            label = "forming" if step < cfg.label_start_step else smoother.update(raw)
+            if step < cfg.label_start_step:
+                label = "forming"
+            elif cfg.sigma_at(step) > TRANSITION_SIGMA:
+                label = "transition"
+                smoother.current = None  # re-classify freshly once the burst ends
+            else:
+                label = smoother.update(raw)
             rec = FrameRecord(frame_set[step], step, s, f, k, raw, label, m)
             records.append(rec)
             if on_frame is not None:
@@ -474,7 +555,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--noise", type=float, default=d.noise, help="additive noise sigma on B per step")
     p.add_argument("--path-start", type=parse_pair, default=d.path_start, metavar="f,k")
     p.add_argument("--path-end", type=parse_pair, default=d.path_end, metavar="f,k")
+    p.add_argument("--preset", choices=sorted(PRESETS), default="v2",
+                   help="named (schedule, noise schedule) pair; v1 = non-monotone overshoot, v2 = monotone + noise burst")
     p.add_argument("--schedule", type=str, help='knots "t:s,t:s,..." (t,s in [0,1]); flat segments = dwell')
+    p.add_argument("--noise-schedule", type=str,
+                   help='knots "t:sigma,..." for time-varying noise; "const" = use --noise everywhere')
+    p.add_argument("--init-smooth-sigma", type=float, help="smoothing scale of the seed noise (default: repo value)")
     p.add_argument("--b-max", type=float, default=d.b_display_max, help="B value mapped to the brightest colour")
     p.add_argument("--hold", type=int, default=d.label_hold_frames, help="frames a new label must persist")
     p.add_argument("--crf", type=int, default=22, help="libx264 constant rate factor (lower = larger/better)")
@@ -486,15 +572,21 @@ def build_config(args: argparse.Namespace) -> SweepConfig:
         size=args.size, seed=args.seed, total_steps=args.steps, frames=args.frames,
         fps=args.fps, scale=args.scale, noise=args.noise, path_start=args.path_start,
         path_end=args.path_end, b_display_max=args.b_max, label_hold_frames=args.hold,
+        init_smooth_sigma=args.init_smooth_sigma,
     )
+    cfg.schedule, cfg.noise_schedule = PRESETS[args.preset]
+    cfg.schedule = list(cfg.schedule)
+    cfg.noise_schedule = None if cfg.noise_schedule is None else list(cfg.noise_schedule)
     if args.schedule:
         cfg.schedule = parse_schedule(args.schedule)
+    if args.noise_schedule:
+        cfg.noise_schedule = None if args.noise_schedule == "const" else parse_schedule(args.noise_schedule)
     if args.config:
         data = json.loads(Path(args.config).read_text())
         for key, value in data.items():
             if key in ("path_start", "path_end"):
                 value = tuple(value)
-            elif key == "schedule":
+            elif key in ("schedule", "noise_schedule") and value is not None:
                 value = [tuple(x) for x in value]
             setattr(cfg, key, value)
     return cfg
