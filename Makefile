@@ -44,5 +44,5 @@ dbm-grid:
 		--etas 0,1,2,3,4,6 --r-w 1.0 --beta 4 --beta-r 2 --mass-max 1200 --s-list 0.03,0.08,0.15,0.3,0.5,0.7,1.0 --zoom 128
 
 dbm-compare:
-	${PYTHON} src/laplacian_pit.py compare --gs media/pit-sweep-v2-phases.png \
+	${PYTHON} src/laplacian_pit.py compare --gs docs/images/pit-sweep-v2-phases.png \
 		--dbm ${DBM_OUT}/pit-dbm-v1-phases.png --out ${DBM_OUT}/gs-v2-vs-dbm-v1.png
