@@ -64,6 +64,8 @@ class LapParams:
     r_w_end: float | None = None   # if set, stamp radius ramps r_w -> r_w_end over s in [ramp_start, 1]
     beta_r_end: float | None = None  # if set, tension radius ramps beta_r -> beta_r_end over s in [ramp_start, 1]
     beta_end: float | None = None    # if set, tension exponent ramps beta -> beta_end over the same interval
+    eta_late: float | None = None    # if set, eta ramps from eta_end -> eta_late over the same late interval
+    polarity: str = "pit-bright"     # display: "pit-bright" (GS v2 convention) or "pit-dark" (stain-like)
     global_s: float = 2.0            # switch from per-nucleus to global (whole-perimeter) growth at s >= global_s
     flow_s: float = 2.0              # curvature flow (majority rule at radius beta_r) on the whole interface for s >= flow_s
     flow_rate: float = 0.2           # fraction of qualifying interface cells flipped per step
@@ -71,9 +73,19 @@ class LapParams:
     flow_add: bool = True            # also fill concave free cells (False = only erode convex pit cells)
     flow_r: float = 0.0              # radius of the pit-fraction disc used by the flow (0 = current beta_r)
     ramp_start: float = 0.0
+    ramp_end: float = 1.0          # late ramps (r_w, beta_r, beta, eta_late) run over s in [ramp_start, ramp_end]
     mass_max: float = 1200.0       # per-nucleus mass (px) at s = 1
     n_active: int = 0              # nuclei that keep growing past dorm_s (0 = all); the rest go dormant
     dorm_s: float = 0.04           # s at which dormant nuclei stop growing
+    stages: str = ""               # multi-stage dormancy "s1:n1,s2:n2": at s_k only the n_k best-spread nuclei keep growing
+    ell_end: float | None = None   # if set, screening length ramps ell -> ell_end over s in [ell_s0, ell_s1]
+    ell_s0: float = 0.05
+    ell_s1: float = 0.3
+    island_flow_s: float = 2.0     # area-preserving island rounding for s >= island_flow_s
+    island_flow_rate: float = 0.2  # fraction of qualifying island-boundary cells moved per step
+    island_flow_r: float = 3.0     # disc radius of the pit fraction used to classify island boundary cells
+    island_flow_delta: float = 0.05  # only cells with pit fraction beyond 0.5 +- delta take part
+    island_max_area: int = 1500    # background components larger than this (the outer stroma) are left alone
     dorm_fade: float = 0.1         # dormant pits regress to nothing over s in [dorm_s, dorm_s + dorm_fade] (0 = keep)
     noise_m: int = 1               # noise reduction: a site must be picked m times before it is added
     beta: float = 4.0              # surface tension proxy: weight ∝ (local pit fraction)^beta
@@ -155,19 +167,27 @@ class LaplacianPits:
         yy, xx = np.mgrid[0:n, 0:n]
         self.colors = [((yy % 2) == a) & ((xx % 2) == b) for a in (0, 1) for b in (0, 1)]
         self.s = 0.0
-        # active nuclei (grow to full budget) vs dormant ones (stop at dorm_s, then regress)
-        self.active = np.ones(self.n_nuc + 1, dtype=bool)
+        # dormancy stages: at s_k only the n_k best-spread nuclei keep growing; the others stop
+        # and regress.  dorm_start[j] = s at which nucleus j goes dormant (inf = stays active).
+        stages = [(float(a), int(b)) for a, b in (tok.split(":") for tok in p.stages.split(",") if tok)]
+        if not stages and 0 < p.n_active < self.n_nuc:
+            stages = [(p.dorm_s, p.n_active)]
+        self.dorm_start = np.full(self.n_nuc + 1, np.inf)
+        if stages:
+            rank = np.empty(self.n_nuc, dtype=int)
+            rank[self._farthest_order()] = np.arange(self.n_nuc)
+            for s_k, n_k in sorted(stages):
+                sel = (rank >= n_k) & ~np.isfinite(self.dorm_start[1:])
+                self.dorm_start[1:][sel] = s_k
+        self.active = ~np.isfinite(self.dorm_start)
         self.active[0] = False
-        if 0 < p.n_active < self.n_nuc:
-            keep = self._farthest_subset(p.n_active)
-            self.active[:] = False
-            self.active[keep + 1] = True
         self.absorbed = np.zeros(self.n_nuc + 1, dtype=bool)
-        self.mass_dorm = None  # mass of each dormant nucleus when regression starts
+        self.mass_dorm = np.zeros(self.n_nuc + 1, dtype=np.int64)
+        self.dorm_captured = np.zeros(self.n_nuc + 1, dtype=bool)
         self.solve(p.sor_init_iters)
 
-    def _farthest_subset(self, k: int) -> np.ndarray:
-        """Greedy max-min (periodic) subset of nuclei so that the active trees are spread evenly."""
+    def _farthest_order(self) -> np.ndarray:
+        """Greedy max-min (periodic) ordering of all nuclei; any prefix is a well-spread subset."""
         n = self.p.size
         pts = self.nuclei
         d = np.abs(pts[:, None, :] - pts[None, :, :])
@@ -175,11 +195,19 @@ class LaplacianPits:
         dist = np.sqrt((d * d).sum(-1))
         chosen = [int(self.rng.integers(len(pts)))]
         mind = dist[chosen[0]].copy()
-        while len(chosen) < k:
+        while len(chosen) < len(pts):
+            mind[chosen] = -1
             j = int(np.argmax(mind))
             chosen.append(j)
             mind = np.minimum(mind, dist[j])
-        return np.array(sorted(chosen))
+        return np.array(chosen)
+
+    def growing(self, s: float | None = None) -> np.ndarray:
+        """Nuclei still allowed to grow at s (not yet dormant, not absorbed)."""
+        s = self.s if s is None else s
+        g = self.dorm_start > s
+        g[0] = False
+        return g & ~self.absorbed
 
     # -- geometry -----------------------------------------------------------
     def _stamp(self, y: int, x: int, j: int, r: float) -> int:
@@ -209,13 +237,20 @@ class LaplacianPits:
         return float(self.agg.mean())
 
     # -- field -------------------------------------------------------------
+    _K9 = np.array([[1.0, 4.0, 1.0], [4.0, 0.0, 4.0], [1.0, 4.0, 1.0]])
+
     @staticmethod
     def _nb9(phi: np.ndarray) -> np.ndarray:
         """Weighted neighbour sum of the isotropic 9-point Laplacian (edges 4, corners 1)."""
-        up, dn = np.roll(phi, 1, 0), np.roll(phi, -1, 0)
-        e = up + dn + np.roll(phi, 1, 1) + np.roll(phi, -1, 1)
-        c = np.roll(up, 1, 1) + np.roll(up, -1, 1) + np.roll(dn, 1, 1) + np.roll(dn, -1, 1)
-        return 4.0 * e + c
+        pad = np.pad(phi, 1, mode="wrap")
+        return cv2.filter2D(pad, -1, LaplacianPits._K9, borderType=cv2.BORDER_REPLICATE)[1:-1, 1:-1]
+
+    def ell_now(self) -> float:
+        p = self.p
+        if p.ell_end is None:
+            return p.ell
+        u = (self.s - p.ell_s0) / max(p.ell_s1 - p.ell_s0, 1e-9)
+        return p.ell + (p.ell_end - p.ell) * float(np.clip(u, 0.0, 1.0))
 
     def solve(self, iters: int) -> float:
         """Jacobi/SOR-type relaxation of (∇² − 1/ℓ²)φ = −1/ℓ² on free cells, φ=0 on the pit set.
@@ -223,7 +258,8 @@ class LaplacianPits:
         9-point stencil: ∇²φ ≈ (4Σedge + Σcorner − 20φ)/6, which is isotropic to 4th order
         and greatly reduces the square-lattice anisotropy of DBM.
         """
-        k2 = 1.0 / (self.p.ell * self.p.ell)
+        ell = self.ell_now()
+        k2 = 1.0 / (ell * ell)
         w = self.p.sor_omega
         agg = self.agg
         phi = self.phi
@@ -276,12 +312,13 @@ class LaplacianPits:
         if p.eta_end is None:
             return p.eta
         u = (self.s - p.eta_hold) / max(p.eta_ramp, 1e-9)
-        return p.eta + (p.eta_end - p.eta) * float(np.clip(u, 0.0, 1.0))
+        e = p.eta + (p.eta_end - p.eta) * float(np.clip(u, 0.0, 1.0))
+        return self._ramp(e, p.eta_late)
 
     def _ramp(self, a: float, b: float | None) -> float:
         if b is None:
             return a
-        u = (self.s - self.p.ramp_start) / max(1.0 - self.p.ramp_start, 1e-9)
+        u = (self.s - self.p.ramp_start) / max(self.p.ramp_end - self.p.ramp_start, 1e-9)
         return a + (b - a) * float(np.clip(u, 0.0, 1.0))
 
     def r_w_now(self) -> float:
@@ -296,27 +333,34 @@ class LaplacianPits:
     def targets(self, s: float) -> np.ndarray:
         """Per-nucleus growth budget (added mass) at sweep position s."""
         p = self.p
-        t = np.full(self.n_nuc + 1, p.mass_max * min(1.0, s))
-        t[~self.active] = p.mass_max * min(s, p.dorm_s)
-        return t
+        return p.mass_max * np.minimum(min(1.0, s), self.dorm_start)
 
     def dorm_targets(self, s: float) -> np.ndarray | None:
-        """Total mass each dormant nucleus may keep at s (None while no regression is due)."""
+        """Total mass each regressing nucleus may keep at s (None while no regression is due).
+        Non-regressing nuclei get their current mass (no constraint)."""
         p = self.p
-        if self.active.all() or p.dorm_fade <= 0 or s <= p.dorm_s:
+        reg = (self.dorm_start < s) & ~self.absorbed
+        reg[0] = False
+        if p.dorm_fade <= 0 or not reg.any():
             return None
-        if self.mass_dorm is None:
-            self.mass_dorm = self.mass.copy()
-        f = max(0.0, 1.0 - (s - p.dorm_s) / p.dorm_fade)
-        return np.floor(self.mass_dorm * f).astype(np.int64)
+        new = reg & ~self.dorm_captured
+        self.mass_dorm[new] = self.mass[new]
+        self.dorm_captured[new] = True
+        f = np.clip(1.0 - (s - self.dorm_start) / p.dorm_fade, 0.0, 1.0)
+        want = self.mass.copy()
+        want[reg] = np.floor(self.mass_dorm[reg] * f[reg]).astype(np.int64)
+        return want
 
     def _absorb(self) -> None:
         """Dormant pits touched by an active tree become part of that tree (no regression)."""
         lab = self.label
-        act = self.active[lab] & (lab > 0)
+        grow = self.growing()
+        act = grow[lab]
         k = np.ones((3, 3), dtype=np.uint8)
         near = cv2.dilate(np.pad(act.astype(np.uint8), 1, mode="wrap"), k)[1:-1, 1:-1] > 0
-        dorm = (lab > 0) & ~self.active[lab] & ~self.absorbed[lab]
+        reg = (self.dorm_start <= self.s) & ~self.absorbed
+        reg[0] = False
+        dorm = reg[lab]
         touch = np.unique(lab[near & dorm])
         if touch.size == 0:
             return
@@ -381,11 +425,68 @@ class LaplacianPits:
             n += ys.size
         return n
 
+    def _island_flow(self) -> int:
+        """Area-preserving rounding of the islands (small background components): for each
+        island, protrusions (island cells with many pit cells within island_flow_r) are filled
+        and notches (pit cells bordering only this island, with few pit cells around) are
+        emptied in equal numbers, so the island keeps its area while its perimeter shrinks.
+        Pit cells separating two islands are never removed (no merging)."""
+        p = self.p
+        lab = self.label
+        agg = lab > 0
+        n_isl, L, st, _ = cv2.connectedComponentsWithStats((~agg).astype(np.uint8), 4)
+        areas = st[:, cv2.CC_STAT_AREA]
+        small = areas <= p.island_max_area
+        small[0] = False
+        if not small.any():
+            return 0
+        frac = self._local_fraction(p.island_flow_r)
+        Lp = np.pad(L, 1, mode="wrap")
+        nb = np.stack([Lp[:-2, 1:-1], Lp[2:, 1:-1], Lp[1:-1, :-2], Lp[1:-1, 2:]])
+        mx = nb.max(0)
+        mn = np.where(nb > 0, nb, np.iinfo(np.int32).max).min(0)
+        single = (mx > 0) & (mx == mn)
+        rm = agg & single & small[mx]
+        fill = (~agg) & small[L] & (nb == 0).any(0)
+        rm_id = np.where(rm, mx, 0)
+        fill_id = np.where(fill, L, 0)
+        ids = np.intersect1d(np.unique(rm_id[rm]), np.unique(fill_id[fill]))
+        if ids.size == 0:
+            return 0
+        moved = 0
+        labp = np.pad(lab, 1, mode="wrap")
+        nb_lab = np.stack([labp[:-2, 1:-1], labp[2:, 1:-1], labp[1:-1, :-2], labp[1:-1, 2:]]).max(0)
+        for i in ids:
+            ry, rx = np.nonzero(rm_id == i)
+            fy, fx = np.nonzero(fill_id == i)
+            k = int(round(p.island_flow_rate * min(ry.size, fy.size)))
+            if k == 0:
+                continue
+            # pair the most notch-like pit cells (lowest pit fraction) with the most protruding island
+            # cells; a swap is made only if it lowers the interface energy (fraction gap > 2*delta)
+            sr = np.argsort(frac[ry, rx] + 1e-3 * self.rng.random(ry.size))[:k]
+            sf = np.argsort(-frac[fy, fx] + 1e-3 * self.rng.random(fy.size))[:k]
+            good = frac[fy[sf], fx[sf]] - frac[ry[sr], rx[sr]] > 2 * p.island_flow_delta
+            k = int(good.sum())
+            if k == 0:
+                continue
+            sr, sf = sr[good], sf[good]
+            ry, rx, fy, fx = ry[sr], rx[sr], fy[sf], fx[sf]
+            np.add.at(self.mass, lab[ry, rx], -1)
+            self.label[ry, rx] = 0
+            owner = nb_lab[fy, fx]
+            ok = owner > 0
+            self.label[fy[ok], fx[ok]] = owner[ok]
+            self.phi[fy[ok], fx[ok]] = 0.0
+            np.add.at(self.mass, owner[ok], 1)
+            moved += k
+        return moved
+
     def _erode(self, want: np.ndarray, tension: np.ndarray) -> int:
         """Remove the most convex boundary cells of dormant pits whose mass exceeds ``want``."""
         lab = self.label
         excess = self.mass - want
-        js = np.nonzero((excess > 0) & ~self.active & ~self.absorbed)[0]
+        js = np.nonzero((excess > 0) & np.isfinite(self.dorm_start) & ~self.absorbed)[0]
         if js.size == 0:
             return 0
         agg = lab > 0
@@ -426,12 +527,18 @@ class LaplacianPits:
         target = self.targets(s_target) + self.mass0
         placed = 0
         want = None
-        if not self.active.all():
+        if np.isfinite(self.dorm_start).any():
             self._absorb()
             want = self.dorm_targets(s_target)
             if want is not None:
                 placed += self._erode(want, frac)
-                target[~self.active] = 0  # regressing pits never regrow
+                target[self.dorm_start < s_target] = 0  # regressing pits never regrow
+        if self.s >= p.island_flow_s:
+            self._island_flow()
+            ys, xs, labs = self.perimeter()
+            phi = np.maximum(self.phi[ys, xs], 1e-300)
+            frac = self._local_fraction()
+            tension = frac[ys, xs] ** beta if beta > 0 else np.ones_like(phi)
         if self.s >= p.flow_s:
             self._curvature_flow(self._local_fraction(p.flow_r) if p.flow_r > 0 else frac)
             ys, xs, labs = self.perimeter()
@@ -452,8 +559,11 @@ class LaplacianPits:
                 i = sel[self.rng.choice(sel.size, p=w)]
                 placed += self._vote(int(ys[i]), int(xs[i]), int(j), r_w)
         else:
-            n_grow = max(1, int(round(p.grow_frac * int(self.active.sum()))))
-            open_mask = (self.mass[labs] < target[labs]) & ~self.absorbed[labs]
+            # pooled budget: every growing tree competes for the same field, nothing is capped per nucleus
+            n_grow = max(1, int(round(p.grow_frac * int(self.growing(s_target).sum()))))
+            open_mask = self.growing(s_target)[labs]
+            if p.growth != "per_nucleus":
+                open_mask &= self.mass[labs] < target[labs]
             sel = np.nonzero(open_mask)[0]
             if sel.size == 0:
                 return 0
@@ -474,13 +584,15 @@ class LaplacianPits:
         stall = 0
         act = self.active
         for _ in range(max_steps):
-            need = (self.targets(s_target) + self.mass0 - self.mass)[act]
-            done = need.max() <= 0
+            grow = self.growing(s_target)
+            need = (self.targets(s_target) + self.mass0 - self.mass)[grow]
+            if p.growth == "per_nucleus" and s_target >= p.global_s:
+                done = need.size == 0 or need.sum() <= 0  # pooled budget in the global phase
+            else:
+                done = need.size == 0 or need.max() <= 0
             want = self.dorm_targets(s_target)
             if want is not None:
-                dorm = ~act & ~self.absorbed
-                dorm[0] = False
-                done = done and (self.mass[dorm] <= want[dorm]).all()
+                done = done and (self.mass <= want).all()
             if done:
                 break
             # s tracks the actual mean mass of the active nuclei so that eta(s), r_w(s) follow the growth
@@ -621,18 +733,20 @@ def skeleton_graph(sk: np.ndarray, min_arm: int = 4, merge_len: int = 3) -> dict
             arms.setdefault(nd, []).append(int(lengths[c]))
     y3 = x4 = 0
     y3_nodes = []
+    y3_arms: list[int] = []
     for nd, ls in arms.items():
         good = [l for l in ls if l >= min_arm]
         if len(ls) == 3 and len(good) == 3:
             y3 += 1
             y3_nodes.append(nd)
+            y3_arms.extend(ls)
         elif len(ls) == 4 and len(good) >= 3:
             x4 += 1
     merged = np.zeros_like(jl, dtype=np.int32)
     if nj > 1:
         lut = np.array(node_of, dtype=np.int32)
         merged = lut[jl]
-    return dict(junc3=y3, junc4=x4, merged_labels=merged, y3_nodes=y3_nodes, n_nodes=len(arms))
+    return dict(junc3=y3, junc4=x4, merged_labels=merged, y3_nodes=y3_nodes, n_nodes=len(arms), y3_arms=y3_arms)
 
 
 def topo_metrics(fg: np.ndarray, roots: np.ndarray | None = None) -> dict:
@@ -657,6 +771,13 @@ def topo_metrics(fg: np.ndarray, roots: np.ndarray | None = None) -> dict:
         euler=int(nf - nb),
         sk_px=int(sk.sum()),
     )
+    # side-branch density and Y arm lengths (arm = skeleton corridor between a Y and the next node/tip)
+    out["ep_per_100sk"] = round(100.0 * out["endpoints"] / max(out["sk_px"], 1), 2)
+    out["y_per_100sk"] = round(100.0 * out["junc3"] / max(out["sk_px"], 1), 2)
+    arms_ = np.array(g["y3_arms"], dtype=float)
+    out["arm_len_mean"] = round(float(arms_.mean()), 1) if arms_.size else 0.0
+    out["arm_len_med"] = float(np.median(arms_)) if arms_.size else 0.0
+    out["arm_ge8_frac"] = round(float((arms_ >= 8).mean()), 2) if arms_.size else 0.0
     # label image of merged Y nodes (0 elsewhere), used for per-tree counts and generations
     y_lab = np.zeros_like(sk_lab, dtype=np.int32)
     if g["y3_nodes"]:
@@ -693,8 +814,25 @@ def topo_metrics(fg: np.ndarray, roots: np.ndarray | None = None) -> dict:
         _, _, bst, _ = cv2.connectedComponentsWithStats((~fg).astype(np.uint8), 4)
         areas = bst[1:, cv2.CC_STAT_AREA]
         out["island_area_med"] = float(np.median(areas))
+        out["island_area_cv"] = round(float(areas.std() / max(areas.mean(), 1e-6)), 2)
+        # circularity 4*pi*A/P^2 of islands not cut by the periodic border
+        n = fg.shape[0]
+        cnts, _ = cv2.findContours((~fg).astype(np.uint8), cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+        circ = []
+        for c in cnts:
+            x, y, w, h = cv2.boundingRect(c)
+            if x == 0 or y == 0 or x + w >= n or y + h >= n:
+                continue
+            # contour runs through boundary pixel centres: Pick-type area and ~pi perimeter corrections
+            a = cv2.contourArea(c) + 0.5 * len(c) + 1.0
+            per = cv2.arcLength(c, True) + math.pi
+            if a >= 6:
+                circ.append(min(1.0, 4 * math.pi * a / (per * per)))
+        out["island_circ_med"] = round(float(np.median(circ)), 2) if circ else float("nan")
     else:
         out["island_area_med"] = float("nan")
+        out["island_area_cv"] = float("nan")
+        out["island_circ_med"] = float("nan")
     return out
 
 
@@ -838,7 +976,8 @@ def render(fg: np.ndarray, phi: np.ndarray | None = None, scale: int = 1, sigma:
 
 def render_state(agg: np.ndarray, p: LapParams, scale: int = 2) -> np.ndarray:
     """Full display pipeline from the lattice pit set (stain blur -> rounding -> LUT)."""
-    return render_soft(display_field(agg, sigma=p.smooth_sigma, morph_r=p.morph_r, scale=scale))
+    v = display_field(agg, sigma=p.smooth_sigma, morph_r=p.morph_r, scale=scale)
+    return render_soft(1.0 - v if p.polarity == "pit-dark" else v)
 
 
 def put_label(img: np.ndarray, lines: list[str], pad: int = 30) -> np.ndarray:
@@ -873,7 +1012,7 @@ def measure(sim: "LaplacianPits") -> tuple[dict, np.ndarray, np.ndarray]:
         m.update({f"raw_{k}": mr[k] for k in RAW_KEYS})
     act = sim.active
     m.update(s=round(float(sim.s), 4), eta=round(sim.eta_now(), 3), r_w=round(sim.r_w_now(), 2),
-             beta_r=round(sim.beta_r_now(), 2), beta=round(sim.beta_now(), 2), n_nuc=sim.n_nuc, n_active=int(act.sum()),
+             beta_r=round(sim.beta_r_now(), 2), beta=round(sim.beta_now(), 2), ell=round(sim.ell_now(), 1), n_nuc=sim.n_nuc, n_active=int(act.sum()),
              n_absorbed=int(sim.absorbed.sum()),
              mass_mean=float((sim.mass[act] - sim.mass0[act]).mean()))
     return m, fg_raw, fg
@@ -900,8 +1039,12 @@ def params_from_args(a: argparse.Namespace, eta: float | None = None) -> LapPara
         eta=a.eta if eta is None else eta, eta_end=getattr(a, "eta_end", None),
         eta_ramp=getattr(a, "eta_ramp", 1.0), eta_hold=getattr(a, "eta_hold", 0.0),
         r_w_end=a.r_w_end, beta_r_end=a.beta_r_end, beta_end=a.beta_end, ramp_start=a.ramp_start,
+        eta_late=a.eta_late, polarity=a.polarity, ramp_end=a.ramp_end,
         global_s=a.global_s, flow_s=a.flow_s, flow_rate=a.flow_rate, flow_delta=a.flow_delta,
-        flow_add=not a.flow_erode_only, flow_r=a.flow_r,
+        flow_add=not a.flow_erode_only, flow_r=a.flow_r, stages=a.stages,
+        ell_end=a.ell_end, ell_s0=a.ell_s0, ell_s1=a.ell_s1, island_flow_s=a.island_flow_s,
+        island_flow_rate=a.island_flow_rate, island_flow_r=a.island_flow_r, island_max_area=a.island_max_area,
+        island_flow_delta=a.island_flow_delta,
         mass_max=a.mass_max, n_active=a.n_active, dorm_s=a.dorm_s, dorm_fade=a.dorm_fade,
         growth=a.growth, seed=a.seed, lattice=a.lattice, sor_iters=a.sor_iters, grow_frac=a.grow_frac,
         noise_m=a.noise_m, smooth_sigma=a.smooth_sigma, beta=a.beta, beta_r=a.beta_r, morph_r=a.morph_r,
@@ -1190,6 +1333,8 @@ def cmd_sheet(a: argparse.Namespace) -> None:
     with open(a.run) as fh:
         d = json.load(fh)
     p = LapParams(**d["params"])
+    if a.polarity:
+        p.polarity = a.polarity
     st = np.load(Path(a.run).with_suffix(".states.npz"))
     packed, size = st["packed"], int(st["size"])
     records = d["records"]
@@ -1240,6 +1385,7 @@ def build_parser() -> argparse.ArgumentParser:
     sh.add_argument("--run", required=True, help="the <video>.json written by the video command")
     sh.add_argument("--out", required=True)
     sh.add_argument("--frames", default="", help="override frames as key:frame pairs, e.g. IVV:1282")
+    sh.add_argument("--polarity", default="", choices=["", "pit-bright", "pit-dark"], help="override display polarity")
     cp = sub.add_parser("compare", help="stack a GS phase sheet above a DBM phase sheet")
     cp.add_argument("--gs", required=True)
     cp.add_argument("--dbm", required=True)
@@ -1265,6 +1411,18 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--flow-delta", type=float, default=0.1)
         sp.add_argument("--flow-erode-only", action="store_true")
         sp.add_argument("--flow-r", type=float, default=0.0, help="disc radius for the flow's pit fraction (0 = beta_r)")
+        sp.add_argument("--stages", default="", help="dormancy stages 's1:n1,s2:n2' (overrides --n-active/--dorm-s)")
+        sp.add_argument("--ell-end", type=float, default=None)
+        sp.add_argument("--ell-s0", type=float, default=0.05)
+        sp.add_argument("--ell-s1", type=float, default=0.3)
+        sp.add_argument("--island-flow-s", type=float, default=2.0, help="area-preserving island rounding from this s")
+        sp.add_argument("--island-flow-rate", type=float, default=0.2)
+        sp.add_argument("--island-flow-r", type=float, default=3.0)
+        sp.add_argument("--island-max-area", type=int, default=1500)
+        sp.add_argument("--island-flow-delta", type=float, default=0.05)
+        sp.add_argument("--eta-late", type=float, default=None)
+        sp.add_argument("--ramp-end", type=float, default=1.0)
+        sp.add_argument("--polarity", default="pit-bright", choices=["pit-bright", "pit-dark"])
         sp.add_argument("--ramp-start", type=float, default=0.0, help="s at which r_w/beta_r ramps start")
         sp.add_argument("--ell", type=float, default=32.0)
         sp.add_argument("--mass-max", type=float, default=1200.0)
