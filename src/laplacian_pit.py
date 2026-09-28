@@ -69,6 +69,7 @@ class LapParams:
     flow_rate: float = 0.2           # fraction of qualifying interface cells flipped per step
     flow_delta: float = 0.1          # dead band around a local pit fraction of 0.5
     flow_add: bool = True            # also fill concave free cells (False = only erode convex pit cells)
+    flow_r: float = 0.0              # radius of the pit-fraction disc used by the flow (0 = current beta_r)
     ramp_start: float = 0.0
     mass_max: float = 1200.0       # per-nucleus mass (px) at s = 1
     n_active: int = 0              # nuclei that keep growing past dorm_s (0 = all); the rest go dormant
@@ -261,9 +262,9 @@ class LaplacianPits:
         ys, xs = np.nonzero(per)
         return ys, xs, cand[ys, xs]
 
-    def _local_fraction(self) -> np.ndarray:
+    def _local_fraction(self, radius: float | None = None) -> np.ndarray:
         """Fraction of pit cells in a disc of radius beta_r around each cell (periodic)."""
-        off = disc_offsets(self.beta_r_now())
+        off = disc_offsets(self.beta_r_now() if radius is None else radius)
         k = np.zeros((off[:, 0].max() * 2 + 1,) * 2, dtype=np.float32)
         k[off[:, 0] + off[:, 0].max(), off[:, 1] + off[:, 1].max()] = 1.0 / len(off)
         pad = off[:, 0].max()
@@ -432,7 +433,7 @@ class LaplacianPits:
                 placed += self._erode(want, frac)
                 target[~self.active] = 0  # regressing pits never regrow
         if self.s >= p.flow_s:
-            self._curvature_flow(frac)
+            self._curvature_flow(self._local_fraction(p.flow_r) if p.flow_r > 0 else frac)
             ys, xs, labs = self.perimeter()
             phi = np.maximum(self.phi[ys, xs], 1e-300)
             tension = self._local_fraction()[ys, xs] ** beta if beta > 0 else np.ones_like(phi)
@@ -900,7 +901,7 @@ def params_from_args(a: argparse.Namespace, eta: float | None = None) -> LapPara
         eta_ramp=getattr(a, "eta_ramp", 1.0), eta_hold=getattr(a, "eta_hold", 0.0),
         r_w_end=a.r_w_end, beta_r_end=a.beta_r_end, beta_end=a.beta_end, ramp_start=a.ramp_start,
         global_s=a.global_s, flow_s=a.flow_s, flow_rate=a.flow_rate, flow_delta=a.flow_delta,
-        flow_add=not a.flow_erode_only,
+        flow_add=not a.flow_erode_only, flow_r=a.flow_r,
         mass_max=a.mass_max, n_active=a.n_active, dorm_s=a.dorm_s, dorm_fade=a.dorm_fade,
         growth=a.growth, seed=a.seed, lattice=a.lattice, sor_iters=a.sor_iters, grow_frac=a.grow_frac,
         noise_m=a.noise_m, smooth_sigma=a.smooth_sigma, beta=a.beta, beta_r=a.beta_r, morph_r=a.morph_r,
@@ -1140,21 +1141,27 @@ def cmd_video(a: argparse.Namespace) -> None:
             print(f"frame {f}/{n_frames} s={s:.3f} phase={label} Y={m['junc3']} euler={m['euler']} "
                   f"t={time.time() - t0:.0f}s", flush=True)
     writer.close()
-    # representative frame per phase: middle of the frames carrying that label
+    # representative frame per phase: midpoint of a schedule plateau carrying that label,
+    # else the middle of all frames carrying it
     panels: dict[str, np.ndarray] = {}
     captions: dict[str, list[str]] = {}
-    rep = {}
+    rep: dict[str, int] = {}
+    for (t0_, s0), (t1_, s1) in zip(knots[:-1], knots[1:]):
+        if abs(s1 - s0) < 0.02 and t1_ > t0_:
+            f = int(round(0.5 * (t0_ + t1_) * (n_frames - 1)))
+            key = records[f]["phase"]
+            rep.setdefault(key, f)
     for key in PHASE_ORDER:
         idx = [r["frame"] for r in records if r["phase"] == key]
         if not idx:
             continue
-        f = idx[len(idx) // 2]
+        f = rep.get(key, idx[len(idx) // 2])
+        rep[key] = f
         agg = np.unpackbits(packed[f])[: p.size * p.size].reshape(p.size, p.size).astype(bool)
         panels[key] = render_state(agg, p, scale=3)
         r = records[f]
         captions[key] = [PHASE_NAMES[key], f"s={r['s']:.3f} eta={r['eta']:.2f} pits={r['n_fg']} Y={r['junc3']} "
                                             f"islands={r['n_bg']} euler={r['euler']}"]
-        rep[key] = f
         np.save(out.with_name(f"{out.stem}_{key}.npy"), packed[f])
     if a.phases_out:
         save_rgb(Path(a.phases_out), phase_sheet(panels, captions))
@@ -1213,6 +1220,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--flow-rate", type=float, default=0.2)
         sp.add_argument("--flow-delta", type=float, default=0.1)
         sp.add_argument("--flow-erode-only", action="store_true")
+        sp.add_argument("--flow-r", type=float, default=0.0, help="disc radius for the flow's pit fraction (0 = beta_r)")
         sp.add_argument("--ramp-start", type=float, default=0.0, help="s at which r_w/beta_r ramps start")
         sp.add_argument("--ell", type=float, default=32.0)
         sp.add_argument("--mass-max", type=float, default=1200.0)
