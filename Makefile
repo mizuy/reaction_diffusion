@@ -22,3 +22,25 @@ sweep-video:
 	${PYTHON} src/sweep_video.py --out artifacts/pit-sweep/pit-sweep.mp4 \
 		--phases-out artifacts/pit-sweep/pit-sweep-phases.png \
 		--metrics-out artifacts/pit-sweep/pit-sweep-metrics.csv
+
+# Laplacian growth (DBM) pit model: src/laplacian_pit.py
+DBM_OUT = artifacts/pit-dbm
+DBM_ARGS = --size 256 --spacing 22 --r0 2 --r-w 1.25 --ell 12 --beta 3 --beta-r 2 --beta-r-end 4 --ramp-start 0.4 \
+	--eta 0 --eta-end 4 --eta-hold 0.006 --eta-ramp 0.014 --n-active 30 --dorm-s 0.04 --dorm-fade 0.08 \
+	--mass-max 1600 --seed 11
+
+dbm-phases:
+	${PYTHON} src/laplacian_pit.py phases --out ${DBM_OUT} --tag pit-dbm-v1 ${DBM_ARGS} \
+		--s-phases 0.006,0.04,0.4,0.9 --scale 3
+
+dbm-video:
+	${PYTHON} src/laplacian_pit.py video --out ${DBM_OUT}/pit-dbm-v1.mp4 \
+		--phases-out ${DBM_OUT}/pit-dbm-v1-phases.png ${DBM_ARGS} --duration 45 --fps 30 --scale 3
+
+dbm-grid:
+	${PYTHON} src/laplacian_pit.py grid --out ${DBM_OUT} --tag eta-grid --size 192 --spacing 48 --ell 32 \
+		--etas 0,1,2,3,4,6 --r-w 1.0 --beta 4 --beta-r 2 --mass-max 1200 --s-list 0.03,0.08,0.15,0.3,0.5,0.7,1.0 --zoom 128
+
+dbm-compare:
+	${PYTHON} src/laplacian_pit.py compare --gs media/pit-sweep-v2-phases.png \
+		--dbm ${DBM_OUT}/pit-dbm-v1-phases.png --out ${DBM_OUT}/gs-v2-vs-dbm-v1.png
