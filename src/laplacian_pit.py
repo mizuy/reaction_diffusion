@@ -516,48 +516,57 @@ def generation_depth(sk: np.ndarray, br_lab: np.ndarray, roots: np.ndarray) -> t
     return int(max(gens)), round(float(np.mean(gens)), 2)
 
 
-def branch_angles(fg: np.ndarray) -> list[float]:
-    """Approximate opening angles (deg) between the two daughter arms at each 3-way junction."""
-    sk, br3 = prepare_skeleton_topology(zhang_suen_thin(fg.astype(bool)))
-    n3, br_lab = cv2.connectedComponents(br3.astype(np.uint8), connectivity=8)
+def branch_angles(fg: np.ndarray, R: int = 7) -> list[float]:
+    """Opening angles (deg) of Y forks: for each merged 3-arm node, skeleton pixels reachable
+    within radius R are traced, the three arm directions are the angular clusters at distance
+    ~R, and the smallest of the three inter-arm angles is returned (the daughter opening)."""
+    from collections import deque
+
+    sk, _ = prepare_skeleton_topology(zhang_suen_thin(fg.astype(bool)))
+    g = skeleton_graph(sk, min_arm=3, merge_len=3)
     n = sk.shape[0]
-    angles = []
-    R = 6
-    for lab in range(1, n3):
-        ys, xs = np.nonzero(br_lab == lab)
-        cy, cx = float(ys.mean()), float(xs.mean())
-        # skeleton pixels on a ring of radius ~R around the junction
-        y0, y1 = int(cy) - R - 1, int(cy) + R + 2
-        x0, x1 = int(cx) - R - 1, int(cx) + R + 2
-        dirs = []
-        for y in range(y0, y1):
-            for x in range(x0, x1):
-                if not sk[y % n, x % n]:
-                    continue
-                d = math.hypot(y - cy, x - cx)
-                if R - 0.7 <= d <= R + 0.7:
-                    dirs.append(math.atan2(y - cy, x - cx))
-        if len(dirs) < 3:
+    angles: list[float] = []
+    for nd in g["y3_nodes"]:
+        ys, xs = np.nonzero(g["merged_labels"] == nd)
+        if ys.size == 0:
             continue
-        # cluster directions
-        dirs = sorted(dirs)
-        clusters = [[dirs[0]]]
-        for a in dirs[1:]:
-            if a - clusters[-1][-1] < 0.5:
+        # unwrap the cluster around its first pixel (periodic domain)
+        cy0, cx0 = int(ys[0]), int(xs[0])
+        cy = cy0 + np.mean(((ys - cy0 + n // 2) % n) - n // 2)
+        cx = cx0 + np.mean(((xs - cx0 + n // 2) % n) - n // 2)
+        q = deque((int(y), int(x), 0.0) for y, x in zip(ys, xs))
+        seen = {(int(y), int(x)) for y, x in zip(ys, xs)}
+        ends = []
+        while q:
+            y, x, _ = q.popleft()
+            dy = ((y - cy + n // 2) % n) - n // 2
+            dx = ((x - cx + n // 2) % n) - n // 2
+            d = math.hypot(dy, dx)
+            if d >= R - 1:
+                ends.append(math.atan2(dy, dx))
+                continue
+            for oy in (-1, 0, 1):
+                for ox in (-1, 0, 1):
+                    ny, nx = (y + oy) % n, (x + ox) % n
+                    if (oy or ox) and sk[ny, nx] and (ny, nx) not in seen:
+                        seen.add((ny, nx))
+                        q.append((ny, nx, 0.0))
+        if len(ends) < 3:
+            continue
+        ends.sort()
+        clusters = [[ends[0]]]
+        for a in ends[1:]:
+            if a - clusters[-1][-1] < 0.6:
                 clusters[-1].append(a)
             else:
                 clusters.append([a])
-        if len(clusters) > 1 and (clusters[0][0] + 2 * math.pi) - clusters[-1][-1] < 0.5:
+        if len(clusters) > 1 and (clusters[0][0] + 2 * math.pi) - clusters[-1][-1] < 0.6:
             clusters[0] = clusters.pop() + [a + 2 * math.pi for a in clusters[0]]
         if len(clusters) != 3:
             continue
-        means = [np.mean(c) for c in clusters]
-        gaps = []
-        for i in range(3):
-            g = (means[(i + 1) % 3] - means[i]) % (2 * math.pi)
-            gaps.append(math.degrees(g))
-        gaps.sort()
-        angles.append(gaps[0])  # smallest inter-arm angle = Y opening angle
+        means = sorted(float(np.mean(c)) % (2 * math.pi) for c in clusters)
+        gaps = [math.degrees((means[(i + 1) % 3] - means[i]) % (2 * math.pi)) for i in range(3)]
+        angles.append(min(gaps))
     return angles
 
 
@@ -728,7 +737,7 @@ def cmd_phases(a: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("grid", "path"):
+    for name in ("grid", "path", "phases"):
         sp = sub.add_parser(name)
         sp.add_argument("--out", default="/tmp/lap")
         sp.add_argument("--tag", default=name)
@@ -758,6 +767,9 @@ def build_parser() -> argparse.ArgumentParser:
             sp.add_argument("--eta", type=float, default=2.0)
             sp.add_argument("--eta-end", type=float, default=None)
             sp.add_argument("--eta-ramp", type=float, default=1.0)
+        if name == "phases":
+            sp.add_argument("--s-phases", default="0.02,0.08,0.4,0.85")
+            sp.add_argument("--scale", type=int, default=2)
     return ap
 
 
@@ -765,6 +777,8 @@ def main(argv: list[str] | None = None) -> None:
     a = build_parser().parse_args(argv)
     if a.cmd == "grid":
         cmd_grid(a)
+    elif a.cmd == "phases":
+        cmd_phases(a)
     else:
         cmd_path(a)
 
