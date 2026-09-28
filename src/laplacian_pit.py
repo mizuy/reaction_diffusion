@@ -1016,7 +1016,8 @@ def classify_phase(m: dict, n_active: int) -> str:
     """Rule-based phase label from the skeleton metrics of one frame."""
     if m["euler"] < 0 and m["n_bg"] > 0.5 * max(n_active, 1):
         return "IVV"
-    if m["junc3"] >= max(4, 0.25 * n_active) and m["trees"] >= 3:
+    # forks per pit: dense tubular fields produce a few accidental Ys, trees have >= 1 per pit
+    if m["junc3"] >= 4 and m["junc3"] >= 0.2 * max(m["n_fg"], 1) and m["trees"] >= 3:
         return "IVB"
     if m["sk_px"] / max(m["n_fg"], 1) >= 4.0:
         return "III"
@@ -1146,11 +1147,7 @@ def cmd_video(a: argparse.Namespace) -> None:
     panels: dict[str, np.ndarray] = {}
     captions: dict[str, list[str]] = {}
     rep: dict[str, int] = {}
-    for (t0_, s0), (t1_, s1) in zip(knots[:-1], knots[1:]):
-        if abs(s1 - s0) < 0.02 and t1_ > t0_:
-            f = int(round(0.5 * (t0_ + t1_) * (n_frames - 1)))
-            key = records[f]["phase"]
-            rep.setdefault(key, f)
+    rep = plateau_frames(knots, records)
     for key in PHASE_ORDER:
         idx = [r["frame"] for r in records if r["phase"] == key]
         if not idx:
@@ -1165,6 +1162,7 @@ def cmd_video(a: argparse.Namespace) -> None:
         np.save(out.with_name(f"{out.stem}_{key}.npy"), packed[f])
     if a.phases_out:
         save_rgb(Path(a.phases_out), phase_sheet(panels, captions))
+    np.savez_compressed(out.with_suffix(".states.npz"), packed=np.stack(packed), size=p.size)
     with open(out.with_suffix(".json"), "w") as fh:
         json.dump(dict(params=asdict(p), knots=knots, fps=a.fps, duration=a.duration, rep_frames=rep,
                        records=records), fh, indent=1)
@@ -1173,6 +1171,48 @@ def cmd_video(a: argparse.Namespace) -> None:
         if ss:
             print(f"{key:4s} s in [{min(ss):.3f}, {max(ss):.3f}] frames={len(ss)}")
     print("saved", out, "in", round(time.time() - t0), "s")
+
+
+def plateau_frames(knots: list[tuple[float, float]], records: list[dict]) -> dict[str, int]:
+    """Representative frame per phase label: midpoint of the first schedule plateau
+    (|ds| <= 0.02, not the initial ramp) whose label is that phase."""
+    n = len(records)
+    rep: dict[str, int] = {}
+    for (t0_, s0), (t1_, s1) in zip(knots[:-1], knots[1:]):
+        if abs(s1 - s0) <= 0.02 + 1e-9 and t1_ > t0_ > 0:
+            f = int(round(0.5 * (t0_ + t1_) * (n - 1)))
+            rep.setdefault(records[f]["phase"], f)
+    return rep
+
+
+def cmd_sheet(a: argparse.Namespace) -> None:
+    """Rebuild the 4-phase sheet from a video run (json + states.npz) without re-simulating."""
+    with open(a.run) as fh:
+        d = json.load(fh)
+    p = LapParams(**d["params"])
+    st = np.load(Path(a.run).with_suffix(".states.npz"))
+    packed, size = st["packed"], int(st["size"])
+    records = d["records"]
+    rep = plateau_frames([tuple(k) for k in d["knots"]], records)
+    if a.frames:
+        for tok in a.frames.split(","):
+            k, f = tok.split(":")
+            rep[k] = int(f)
+    panels, captions = {}, {}
+    for key in PHASE_ORDER:
+        idx = [r["frame"] for r in records if r["phase"] == key]
+        if key not in rep and idx:
+            rep[key] = idx[len(idx) // 2]
+        if key not in rep:
+            continue
+        f = rep[key]
+        agg = np.unpackbits(packed[f])[: size * size].reshape(size, size).astype(bool)
+        panels[key] = render_state(agg, p, scale=3)
+        r = records[f]
+        captions[key] = [PHASE_NAMES[key], f"s={r['s']:.3f} eta={r['eta']:.2f} pits={r['n_fg']} Y={r['junc3']} "
+                                            f"islands={r['n_bg']} euler={r['euler']}"]
+    save_rgb(Path(a.out), phase_sheet(panels, captions))
+    print("frames", rep, "saved", a.out)
 
 
 def cmd_compare(a: argparse.Namespace) -> None:
@@ -1196,6 +1236,10 @@ def cmd_compare(a: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
+    sh = sub.add_parser("sheet", help="rebuild the 4-phase sheet from a saved video run")
+    sh.add_argument("--run", required=True, help="the <video>.json written by the video command")
+    sh.add_argument("--out", required=True)
+    sh.add_argument("--frames", default="", help="override frames as key:frame pairs, e.g. IVV:1282")
     cp = sub.add_parser("compare", help="stack a GS phase sheet above a DBM phase sheet")
     cp.add_argument("--gs", required=True)
     cp.add_argument("--dbm", required=True)
@@ -1273,6 +1317,8 @@ def main(argv: list[str] | None = None) -> None:
         cmd_video(a)
     elif a.cmd == "compare":
         cmd_compare(a)
+    elif a.cmd == "sheet":
+        cmd_sheet(a)
     else:
         cmd_path(a)
 

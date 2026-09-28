@@ -25,17 +25,19 @@ sweep-video:
 
 # Laplacian growth (DBM) pit model: src/laplacian_pit.py
 DBM_OUT = artifacts/pit-dbm
-DBM_ARGS = --size 256 --spacing 22 --r0 2 --r-w 1.25 --ell 12 --beta 3 --beta-r 2 --beta-r-end 4 --ramp-start 0.4 \
-	--eta 0 --eta-end 4 --eta-hold 0.006 --eta-ramp 0.014 --n-active 30 --dorm-s 0.04 --dorm-fade 0.08 \
-	--mass-max 1600 --seed 11
+DBM_ARGS = --size 256 --spacing 22 --r0 2 --r-w 1.5 --r-w-end 2.25 --ell 12 --beta 3 --beta-r 2 --beta-r-end 5 \
+	--ramp-start 0.4 --eta 0 --eta-end 4 --eta-hold 0.006 --eta-ramp 0.014 --n-active 30 --dorm-s 0.04 --dorm-fade 0.08 \
+	--flow-s 0.6 --flow-rate 0.1 --flow-delta 0.15 --flow-r 3 --mass-max 1900 --seed 11
+DBM_KNOTS = 0:0,0.08:0.006,0.18:0.007,0.28:0.04,0.38:0.042,0.60:0.40,0.70:0.41,0.90:0.72,1:0.74
 
 dbm-phases:
 	${PYTHON} src/laplacian_pit.py phases --out ${DBM_OUT} --tag pit-dbm-v1 ${DBM_ARGS} \
-		--s-phases 0.006,0.04,0.4,0.9 --scale 3
+		--s-phases 0.006,0.04,0.4,0.72 --scale 3
 
 dbm-video:
 	${PYTHON} src/laplacian_pit.py video --out ${DBM_OUT}/pit-dbm-v1.mp4 \
-		--phases-out ${DBM_OUT}/pit-dbm-v1-phases.png ${DBM_ARGS} --duration 45 --fps 30 --scale 3
+		--phases-out ${DBM_OUT}/pit-dbm-v1-phases.png ${DBM_ARGS} --duration 45 --fps 30 --scale 3 \
+		--metric-every 3 --knots ${DBM_KNOTS}
 
 dbm-grid:
 	${PYTHON} src/laplacian_pit.py grid --out ${DBM_OUT} --tag eta-grid --size 192 --spacing 48 --ell 32 \
