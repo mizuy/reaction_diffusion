@@ -21,6 +21,13 @@ Type II と Type VN は、この段階では評価対象から外す。
 - 局所インヒビター場 **H**（Step 4）: [`pit_type_iv_local_inhibitor_concept.md`](pit_type_iv_local_inhibitor_concept.md)
 - bistable plateau **W**（Step 5・幅の固定）: [`pit_type_iv_bistable_width_concept.md`](pit_type_iv_bistable_width_concept.md)
 
+4 相（Type I → III → IV branching → IV villous）を 1 パラメータ掃引で出す試みのレポート群:
+
+- 実現可能性診断と方針: [`feasibility-and-approach.md`](feasibility-and-approach.md)
+- GS (f,k) 経路の時間掃引動画（`src/sweep_video.py`）: [v1](gs-sweep-v1-report.md) / [v2（単調スケジュール）](gs-sweep-v2-report.md) / [v3 拡散比](gs-sweep-v3-diffratio-report.md) / [v3 非等方拡散](gs-sweep-v3-aniso-report.md)
+- 分岐機構の設計とプロトタイプ（`src/branching_prototypes.py`）: [`branching-mechanism-design.md`](branching-mechanism-design.md)
+- Laplacian growth (DBM) による 4 相再現の可否: [`laplacian-growth-feasibility.md`](laplacian-growth-feasibility.md)
+
 ## 現在の基本モデル
 
 既存コードは Gray-Scott 型の反応拡散モデルとして読める。
