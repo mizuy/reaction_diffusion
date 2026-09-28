@@ -113,6 +113,16 @@ class ProtoConfig:
     s_delta: float = 0.001  # screening length along the channel: sqrt(d_s/s_delta) ~ 14 px
     s_zero: float = 0.2  # half-saturation of g as a fraction of the root level s_rho/s_delta
     s_b_ref: float = 0.25
+    s_chi0: float = 0.0  # background conductance of the S channel (halo); 0 = strictly inside B
+    s_hill: int = 0  # 0: chi = min(1, B/b_ref) (leaky); n>0: chi = B^n/(B^n + b_ref^n) (selective channel)
+    # root mask threshold on B at t_on.  0.3 = spot cores only (S then spreads over the whole
+    # spot footprint and equilibrates at ~0.2 rho/delta, i.e. g ~ 0.5 inside the pit); 0.1 = whole footprint.
+    s_root_thr: float = 0.3
+    # Dirichlet root: S is clamped to rho/delta on the root every step (constant-supply pit mouth),
+    # so S(L) = (rho/delta) exp(-L/l_S) along a channel with no dilution by the total B area.
+    s_dirichlet: bool = False
+    s_root_dilate: int = 0  # dilate the root mask by this many px (keeps a spot fed while it settles)
+    s_root_keep: float = 1.0  # keep only this fraction of the root components (sparse-root demo device)
     # coupling of g = S/(S+S0): "react" -> reaction * (g_min + (1-g_min) g) ; "kill" -> k += s_kill (1-g) ;
     # "widen" -> k -= s_widen g (1-g)  (combine with '+', e.g. "kill+widen")
     s_mode: str = "kill"
@@ -120,6 +130,11 @@ class ProtoConfig:
     s_widen: float = 0.002
     s_feed: float = 0.010
     s_gmin: float = 0.5
+    # stage-2 couplings (S -> transport / activator side)
+    s_beta_b: float = 1.0  # "dbeta":  d_B_eff = d_B (1 + beta_b (1-g)); need d_B (1+beta_b) <= 1
+    s_beta_a: float = 0.0  # "dabeta": d_A_eff = d_A (1 + beta_a (1-g)); need d_A (1+beta_a) <= 1 -> use d_a<1
+    s_boost: float = 0.5  # "boost":  A B^2 (1 + boost (1-g))
+    s_cubic: float = 1.0  # "cubic":  A B^2 (1 + cubic (1-g) B)
     # optional linear ramp of (f,k) from (f,k) to (f1,k1), starting at t_on and
     # lasting ramp_steps (0 -> until the end of the run); afterwards hold (f1,k1)
     f1: float | None = None
@@ -130,6 +145,20 @@ class ProtoConfig:
     g_size1: int = 0
     g_t0: int = 0
     g_t1: int = 0
+    # BARW-like hybrid (stage 3): tips are particles that deposit B; the RD (GS + S)
+    # provides the stripe width and the starvation stop.  0 = off.
+    tips_per_root: int = 0
+    tip_v: float = 0.03  # px / step
+    tip_pb: float = 0.002  # branching probability per step, multiplied by g at the tip
+    tip_dtheta: float = 0.6  # half opening angle of a branching event (rad)
+    tip_sigma: float = 0.05  # angular noise per step (rad)
+    tip_gstop: float = 0.3  # tip is removed when g at the tip falls below this
+    tip_r: float = 2.0  # deposit radius (px)
+    tip_b: float = 0.5  # deposited B level (max with the field)
+    tip_refractory: int = 600  # steps after a branching event during which a tip does not branch
+    tip_max: int = 600  # global cap on the number of live tips
+    t_tips: int = 0  # step at which the tips are spawned (0 = t_on)
+    tip_max_path: float = 0.0  # tip is removed after travelling this path length (px); 0 = S gate only
     snapshots: int = 6
 
 
@@ -142,19 +171,49 @@ class State:
 
 
 def lap(u: np.ndarray) -> np.ndarray:
-    return cv2.filter2D(u, -1, KERNEL)
+    # periodic boundaries (the repo uses reflect); keeps the Laplacian consistent with the
+    # np.roll based transport terms and with the growing-domain resize
+    padded = np.pad(u, 1, mode="wrap")
+    return cv2.filter2D(padded, -1, KERNEL, borderType=cv2.BORDER_REPLICATE)[1:-1, 1:-1]
 
 
-def channel_diffusion(s: np.ndarray, b: np.ndarray, d: float, b_ref: float = 0.25) -> np.ndarray:
-    """Conservative div(d chi(B) grad s), chi = min(1, B/b_ref), face-averaged (4-neighbour).
+def channel_chi(b: np.ndarray, b_ref: float, hill: int) -> np.ndarray:
+    """Channel conductance chi(B) in [0,1].  hill=0: min(1, B/b_ref) (leaky: the GS background
+    B ~ 0.02-0.08 between spots still conducts 10-30%).  hill>=1: B^n/(B^n + b_ref^n) (selective)."""
+    if hill <= 0:
+        return np.minimum(1.0, b / b_ref)
+    bn = b ** hill
+    return bn / (bn + b_ref**hill)
 
-    Explicit stability requires 4 d <= 1 (d <= 0.25)."""
-    mob = d * np.minimum(1.0, b / b_ref)
+
+def channel_diffusion(s: np.ndarray, b: np.ndarray, d: float, b_ref: float = 0.25, chi0: float = 0.0,
+                      hill: int = 0) -> np.ndarray:
+    """Conservative div(d chi(B) grad s), chi = max(chi0, channel_chi(B)), face-averaged (4-neighbour).
+
+    chi0 > 0 lets S leak a few px beyond the B envelope (halo), so that the pit's own
+    boundary is not read as "starved".  Explicit stability requires 4 d <= 1 (d <= 0.25)."""
+    mob = d * np.maximum(chi0, channel_chi(b, b_ref, hill))
     out = np.zeros_like(s)
     for axis, shift in ((0, 1), (0, -1), (1, 1), (1, -1)):
         s_n = np.roll(s, shift, axis=axis)
         m_n = np.roll(mob, shift, axis=axis)
         out += 0.5 * (mob + m_n) * (s_n - s)
+    return out
+
+
+_STENCIL9 = [(0, 1, 0.2), (0, -1, 0.2), (1, 0, 0.2), (-1, 0, 0.2),
+             (1, 1, 0.05), (1, -1, 0.05), (-1, 1, 0.05), (-1, -1, 0.05)]
+
+
+def div_grad(u: np.ndarray, mob: np.ndarray) -> np.ndarray:
+    """Conservative div(mob grad u) on the same 9-point stencil as KERNEL (mob=const -> mob*lap(u)).
+
+    Explicit stability requires max(mob) <= 1."""
+    out = np.zeros_like(u)
+    for dy, dx, w in _STENCIL9:
+        u_n = np.roll(np.roll(u, dy, axis=0), dx, axis=1)
+        m_n = np.roll(np.roll(mob, dy, axis=0), dx, axis=1)
+        out += w * 0.5 * (mob + m_n) * (u_n - u)
     return out
 
 
@@ -203,6 +262,8 @@ def step(st: State, cfg: ProtoConfig, f: float, k: float, active: bool, rng, gai
     f_eff: float | np.ndarray = f
     k_eff: float | np.ndarray = k
     react_gain: float | np.ndarray = 1.0
+    mob_a: np.ndarray | None = None
+    mob_b: np.ndarray | None = None
     next_x = x
 
     if active and cfg.mech == "H":
@@ -232,17 +293,36 @@ def step(st: State, cfg: ProtoConfig, f: float, k: float, active: bool, rng, gai
         if "fedwide" in cfg.s_mode:
             # well-fed tissue (near the root) gets a higher feed -> wide, fingering base
             f_eff = f_eff + gain * cfg.s_feed * g
+        if "boost" in cfg.s_mode:
+            # activator side: starved tissue autocatalyses harder (AB^2 gain > 1 at the tip)
+            react_gain = react_gain * (1.0 + gain * cfg.s_boost * (1.0 - g))
+        if "cubic" in cfg.s_mode:
+            # activator side: starved tissue gets an extra A B^3 term (steeper autocatalysis)
+            react_gain = react_gain + gain * cfg.s_cubic * (1.0 - g) * b
+        # starvation weighted by tissue presence: outside the B envelope S is always ~0,
+        # so the pit's own boundary must not be read as starved tissue.
+        starved = (1.0 - g) * np.minimum(1.0, b / cfg.s_b_ref)
+        if "dbeta" in cfg.s_mode:
+            # tip flattening: B diffuses faster (beta>0) or slower (beta<0) where starved
+            mob_b = cfg.d_b * (1.0 + gain * cfg.s_beta_b * starved)
+        if "dabeta" in cfg.s_mode:
+            # Mullins-Sekerka style: the substrate A diffuses faster/slower where the tissue is starved
+            mob_a = cfg.d_a * (1.0 + gain * cfg.s_beta_a * starved)
         next_x = (
             x
-            + channel_diffusion(x, b, cfg.d_s, cfg.s_b_ref)
+            + channel_diffusion(x, b, cfg.d_s, cfg.s_b_ref, cfg.s_chi0, cfg.s_hill)
             + cfg.s_rho * st.root
             - cfg.s_delta * x
         )
         next_x = np.clip(next_x, 0.0, 2.0 * s_root)
+        if cfg.s_dirichlet:
+            next_x = np.where(st.root > 0, s_root, next_x)
 
     ab2 = a * b * b * react_gain
-    next_a = a + cfg.d_a * lap(a) - ab2 + f_eff * (1.0 - a)
-    next_b = b + cfg.d_b * lap(b) + ab2 - (k_eff + f_eff) * b
+    diff_a = div_grad(a, mob_a) if mob_a is not None else cfg.d_a * lap(a)
+    diff_b = div_grad(b, mob_b) if mob_b is not None else cfg.d_b * lap(b)
+    next_a = a + diff_a - ab2 + f_eff * (1.0 - a)
+    next_b = b + diff_b + ab2 - (k_eff + f_eff) * b
     if cfg.noise > 0:
         next_b = next_b + cfg.noise * rng.standard_normal(b.shape, dtype=np.float32)
     return State(
@@ -278,7 +358,7 @@ def tree_metrics(b: np.ndarray) -> dict[str, float]:
         "largest_frac": float(areas[keep].max() / areas[keep].sum()) if comps else 0.0,
     }
     if comps == 0:
-        out.update(skeleton_px=0, endpoints=0, junc3=0, trees=0, mean_arm=0.0, longest_skel=0)
+        out.update(skeleton_px=0, endpoints=0, junc3=0, trees=0, max_junc_tree=0, mean_arm=0.0, longest_skel=0)
         return out
     sk_raw = zhang_suen_thin(fg)
     sk, branch = prepare_skeleton_topology(sk_raw, prune_spurs=4, min_arm_length=5)
@@ -286,11 +366,16 @@ def tree_metrics(b: np.ndarray) -> dict[str, float]:
     ends = skeleton_endpoints(sk)
     ns, slab, sstats, _ = cv2.connectedComponentsWithStats(sk.astype(np.uint8), 8)
     skel_areas = sstats[1:, cv2.CC_STAT_AREA] if ns > 1 else np.array([0])
-    # trees = skeleton components containing >= 1 three-arm junction
+    # trees = skeleton components containing >= 1 three-arm junction;
+    # max_junc_tree = most junction clusters in one component (>=3 -> at least 2 generations)
     trees = 0
+    max_junc_tree = 0
     for lab in range(1, ns):
-        if branch[slab == lab].any():
+        jl = np.unique(jlab[(slab == lab) & branch])
+        nj_here = int((jl > 0).sum())
+        if nj_here:
             trees += 1
+            max_junc_tree = max(max_junc_tree, nj_here)
     segs = sk & ~branch
     nseg, _, segstats, _ = cv2.connectedComponentsWithStats(segs.astype(np.uint8), 8)
     mean_arm = float(segstats[1:, cv2.CC_STAT_AREA].mean()) if nseg > 1 else 0.0
@@ -299,6 +384,7 @@ def tree_metrics(b: np.ndarray) -> dict[str, float]:
         endpoints=int(ends.sum()),
         junc3=int(nj - 1),
         trees=trees,
+        max_junc_tree=max_junc_tree,
         mean_arm=mean_arm,
         longest_skel=int(skel_areas.max()),
     )
@@ -316,6 +402,63 @@ def render(b: np.ndarray, label: str, scale: int = 2) -> np.ndarray:
     cv2.rectangle(img, (0, 0), (img.shape[1], 16), (0, 0, 0), -1)
     cv2.putText(img, label, (3, 12), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 255, 255), 1, cv2.LINE_AA)
     return img
+
+
+@dataclass
+class Tip:
+    y: float
+    x: float
+    theta: float
+    gen: int = 0
+    last_branch: int = 0
+    path: float = 0.0
+
+
+def spawn_tips(root: np.ndarray, cfg: ProtoConfig, rng, t: int) -> list[Tip]:
+    n, labels, stats, cents = cv2.connectedComponentsWithStats(root.astype(np.uint8), 8)
+    tips: list[Tip] = []
+    for i in range(1, n):
+        cx, cy = cents[i]
+        th0 = rng.uniform(0, 2 * np.pi)
+        for j in range(cfg.tips_per_root):
+            tips.append(Tip(float(cy), float(cx), th0 + 2 * np.pi * j / cfg.tips_per_root, 0, t))
+    return tips
+
+
+def update_tips(tips: list[Tip], st: State, cfg: ProtoConfig, rng, t: int, s_root: float) -> tuple[list[Tip], int]:
+    """Move / branch / stop the tip particles and deposit B.  Returns (tips, n_branch_events)."""
+    n = st.b.shape[0]
+    g_field = st.x / (st.x + cfg.s_zero * s_root)
+    alive: list[Tip] = []
+    births = 0
+    for tp in tips:
+        iy, ix = int(round(tp.y)) % n, int(round(tp.x)) % n
+        g = float(g_field[iy, ix])
+        if g < cfg.tip_gstop or (cfg.tip_max_path > 0 and tp.path >= cfg.tip_max_path):
+            continue  # starved / exhausted: the tip stops (the RD keeps the deposited stripe)
+        tp.theta += cfg.tip_sigma * rng.standard_normal()
+        tp.y = (tp.y + cfg.tip_v * np.sin(tp.theta)) % n
+        tp.x = (tp.x + cfg.tip_v * np.cos(tp.theta)) % n
+        tp.path += cfg.tip_v
+        if (t - tp.last_branch > cfg.tip_refractory and len(tips) + births < cfg.tip_max
+                and rng.random() < cfg.tip_pb * g):
+            births += 1
+            child = Tip(tp.y, tp.x, tp.theta - cfg.tip_dtheta, tp.gen + 1, t, tp.path)
+            tp.theta += cfg.tip_dtheta
+            tp.gen += 1
+            tp.last_branch = t
+            alive.append(child)
+        alive.append(tp)
+    if alive:
+        r = int(cfg.tip_r)
+        dy, dx = np.mgrid[-r : r + 1, -r : r + 1]
+        disk = (dy * dy + dx * dx) <= cfg.tip_r * cfg.tip_r
+        oy, ox = dy[disk], dx[disk]
+        ys = (np.array([round(tp.y) for tp in alive], int)[:, None] + oy[None, :]) % n
+        xs = (np.array([round(tp.x) for tp in alive], int)[:, None] + ox[None, :]) % n
+        st.b[ys, xs] = np.maximum(st.b[ys, xs], cfg.tip_b)
+        st.a[ys, xs] = np.minimum(st.a[ys, xs], 0.3)
+    return alive, births
 
 
 def domain_size(cfg: ProtoConfig, t: int) -> int:
@@ -342,14 +485,31 @@ def run(cfg: ProtoConfig, out: Path | None = None, verbose: bool = True) -> list
     rows: list[dict] = []
     tiles: list[np.ndarray] = []
     tile_size = max(cfg.size, cfg.g_size1)
+    tips: list[Tip] = []
+    n_births = 0
     for t in range(1, cfg.steps + 1):
         active = t >= cfg.t_on
         n_now = domain_size(cfg, t)
         if n_now != st.b.shape[0]:
+            scale = n_now / st.b.shape[0]
             st = resize_state(st, n_now)
+            for tp in tips:
+                tp.y *= scale
+                tp.x *= scale
         if cfg.mech == "S" and t == max(cfg.t_on, 1):
-            st.root = (st.b > 0.3).astype(np.float32)
+            root = (st.b > cfg.s_root_thr).astype(np.uint8)
+            if cfg.s_root_dilate > 0:
+                d = 2 * cfg.s_root_dilate + 1
+                root = cv2.dilate(root, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (d, d)))
+            if cfg.s_root_keep < 1.0:
+                n_lab, lab = cv2.connectedComponents(root, connectivity=8)
+                keep = rng.random(n_lab) < cfg.s_root_keep
+                keep[0] = False
+                root = keep[lab].astype(np.uint8)
+            st.root = root.astype(np.float32)
             st.x = (cfg.s_rho / cfg.s_delta) * st.root
+        if cfg.tips_per_root > 0 and t == max(cfg.t_tips or cfg.t_on, 1) and st.root is not None:
+            tips = spawn_tips(st.root, cfg, rng, t)
         if cfg.f1 is not None and active:
             span = cfg.ramp_steps if cfg.ramp_steps > 0 else (cfg.steps - cfg.t_on)
             u = min(1.0, (t - cfg.t_on) / max(span, 1))
@@ -358,15 +518,21 @@ def run(cfg: ProtoConfig, out: Path | None = None, verbose: bool = True) -> list
         else:
             f, k = cfg.f, cfg.k
         st = step(st, cfg, f, k, active, rng)
+        if tips and active:
+            tips, births = update_tips(tips, st, cfg, rng, t, cfg.s_rho / cfg.s_delta)
+            n_births += births
         if t in snap_steps:
             m = tree_metrics(st.b)
-            m.update(step=t, f=f, k=k, x_mean=float(st.x.mean()), x_max=float(st.x.max()), b_mean=float(st.b.mean()))
+            m.update(step=t, f=f, k=k, x_mean=float(st.x.mean()), x_max=float(st.x.max()), b_mean=float(st.b.mean()),
+                     tips_alive=len(tips), tip_births=n_births,
+                     tip_max_gen=max((tp.gen for tp in tips), default=0))
             rows.append(m)
             if verbose:
+                extra = f" tips={len(tips)} births={n_births} gen={m['tip_max_gen']}" if cfg.tips_per_root else ""
                 print(
                     f"t={t:6d} f={f:.4f} k={k:.4f} cov={m['coverage']:.3f} comp={m['components']:3d} "
-                    f"trees={m['trees']:2d} junc3={m['junc3']:3d} ends={m['endpoints']:3d} "
-                    f"longest={m['longest_skel']:4d} arm={m['mean_arm']:5.1f} x={m['x_mean']:.3f}/{m['x_max']:.3f}",
+                    f"trees={m['trees']:2d} junc3={m['junc3']:3d} mjt={m['max_junc_tree']:2d} ends={m['endpoints']:3d} "
+                    f"longest={m['longest_skel']:4d} arm={m['mean_arm']:5.1f} x={m['x_mean']:.3f}/{m['x_max']:.3f}" + extra,
                     flush=True,
                 )
             tile = render(st.b, f"{cfg.mech} t={t} n={st.b.shape[0]} j3={m['junc3']} tr={m['trees']} L={m['longest_skel']}")
@@ -414,7 +580,7 @@ def run_sweep(cfg: ProtoConfig, total_steps: int, out: Path | None, s_off: float
         sigma = schedule_s(t, total_steps, NOISE_SCHEDULE_V2) if use_noise_schedule else cfg.noise
         active = t >= cfg.t_on
         if cfg.mech == "S" and t == cfg.t_on:
-            st.root = (st.b > 0.3).astype(np.float32)
+            st.root = (st.b > cfg.s_root_thr).astype(np.float32)
             st.x = (cfg.s_rho / cfg.s_delta) * st.root
         gain = float(np.clip((s_off - s) / max(s_off - s_on, 1e-9), 0.0, 1.0))
         st = step(st, cfg, f, k, active, rng, gain=gain)
@@ -479,7 +645,11 @@ def main() -> None:
         cfg.g_size1, cfg.g_t0, cfg.g_t1 = (int(v) for v in args.grow.split(","))
     for item in args.set:
         name, value = item.split("=")
-        setattr(cfg, name, type(getattr(cfg, name))(value) if getattr(cfg, name) is not None else float(value))
+        cur = getattr(cfg, name)
+        if isinstance(cur, bool):
+            setattr(cfg, name, value.lower() in ("1", "true", "yes"))
+        else:
+            setattr(cfg, name, type(cur)(value) if cur is not None else float(value))
     if args.sweep > 0:
         run_sweep(cfg, args.sweep, args.out, s_off=args.sweep_off, s_on=args.sweep_on,
                   use_noise_schedule=not args.sweep_const_noise)
