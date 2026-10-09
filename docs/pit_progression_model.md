@@ -114,7 +114,7 @@ SH の spot→stripe 遷移には**有限長ロッドのアトラクタが存在
 make pit-goal-spatial
 ```
 
-1 枚サマリー（**現行モデルの実績**。ゴール規範ではない。規範は [`pit_pattern_goal.md`](pit_pattern_goal.md) §9.1）: [`images/goal_all_results_one_page.png`](images/goal_all_results_one_page.png)
+1 枚サマリー（**現行モデルの実績**。ゴール規範ではない。規範は [`pit_pattern_goal.md`](pit_pattern_goal.md) §4）: [`images/goal_all_results_one_page.png`](images/goal_all_results_one_page.png)
 
 ## 6. 現状の診断
 
