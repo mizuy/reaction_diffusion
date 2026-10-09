@@ -3,7 +3,7 @@
 拡大内視鏡で見る大腸 pit pattern（工藤分類）の進行 **Type I → IIIL → IV_B → IV_V** を、1 本の連続パラメータで再現するモデルを探すプロジェクト。
 
 - **ゴール（まず読む）**: [`docs/pit_pattern_goal.md`](docs/pit_pattern_goal.md)。答案見本は [`docs/images/pit_ideal_sweep.png`](docs/images/pit_ideal_sweep.png)
-- **現在の到達点**: 畝–溝モデル [`docs/models/pit_groove_model.md`](docs/models/pit_groove_model.md)
+- **現在の到達点**: 陰窩分葉モデル [`docs/models/pit_crypt_model.md`](docs/models/pit_crypt_model.md)（答案見本の 4 帯を再現）
 - **文書の一覧**: [`docs/README.md`](docs/README.md)
 
 ## セットアップ
@@ -32,10 +32,15 @@ artifacts/      計算結果（git 管理外。再計算で作り直せる）
 ## よく使うコマンド
 
 ```bash
-# 現行モデル（畝–溝モデル）
-uv run python -m pitpattern.models.simulate_pit_groove sweep --output artifacts/pit_groove/try --seeds 1 --drives -0.3 0 0.15
-make pit-groove-explore        # 探索 seed 1/7/42
-make pit-groove-validate       # 検証 seed 100–119 + 集計 + 図
+# 現行モデル（陰窩分葉モデル）
+uv run python -m pitpattern.models.simulate_pit_crypt scan --output artifacts/pit_crypt/try --seeds 1 --ps 0.2 0.9 2.3 3.2
+make pit-crypt-validate        # 検証 seed 100–119 + 集計
+make pit-crypt-sweep           # p を左→右に変えた横長の 1 枚
+make pit-crypt-figures
+
+# 一つ前のモデル（畝–溝モデル）
+make pit-groove-explore
+make pit-groove-validate
 
 # 図
 make target-figures            # 答案見本・参照シート・シェーマ

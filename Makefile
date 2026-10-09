@@ -2,6 +2,7 @@ PYTHON = uv run python
 SRC = src/pitpattern
 
 .PHONY: setup test target-figures model-comparison \
+	pit-crypt-explore pit-crypt-validate pit-crypt-sweep pit-crypt-figures \
 	pit-groove-explore pit-groove-validate \
 	goal-figures voronoi cpm particles figueiredo buckling \
 	pit-goal-spatial pit-goal-smoke pit-goal-sweep pit-goal-ramp pit-goal-compare pit-goal-robustness \
@@ -24,6 +25,22 @@ target-figures:
 
 model-comparison:
 	${PYTHON} ${SRC}/figures/make_model_comparison.py
+
+# ---------------------------------------------------------------- crypt lobulation model (docs/models/pit_crypt_model.md)
+CRYPT_PS = 0.1 0.2 0.3 0.8 0.9 1.0 2.2 2.3 2.4 3.0 3.2 3.4
+
+pit-crypt-explore:
+	${PYTHON} ${SRC}/models/simulate_pit_crypt.py scan --output artifacts/pit_crypt/explore --seeds 1 2 3 --ps 0.3 0.9 1.6 2.3 3.3 --hold 500
+
+pit-crypt-validate:
+	for s in $$(seq 100 119); do ${PYTHON} ${SRC}/models/simulate_pit_crypt.py scan --output artifacts/pit_crypt/validation/seed$$s --seeds $$s --ps ${CRYPT_PS} --hold 500 2000; done
+	${PYTHON} ${SRC}/evaluation/evaluate_pit_crypt.py 'artifacts/pit_crypt/validation/seed*/metrics.csv' --json artifacts/pit_crypt/validation/summary.json
+
+pit-crypt-sweep:
+	${PYTHON} ${SRC}/models/simulate_pit_crypt.py sweep --output artifacts/pit_crypt/sweep --seed 1 --p-left -0.5 --p-right 3.4 --sweeps 2000
+
+pit-crypt-figures:
+	${PYTHON} ${SRC}/figures/make_pit_crypt_figures.py
 
 # ---------------------------------------------------------------- crest-groove model (docs/models/pit_groove_model.md)
 GROOVE_DRIVES = -0.40 -0.375 -0.35 -0.30 -0.25 -0.20 -0.15 -0.125 -0.10 -0.075 -0.05 -0.025 0.0 0.0125 0.025 0.0375 0.05 0.075 0.10 0.125 0.15 0.20

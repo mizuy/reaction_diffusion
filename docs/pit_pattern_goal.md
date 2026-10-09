@@ -98,6 +98,7 @@ Type II / II-L / II-O、III_H、IV_H（シダの葉・松毬様）、Type VI / V
 
 | ファイル | 内容 |
 |---|---|
+| [`pit_crypt_model.md`](models/pit_crypt_model.md) | **陰窩分葉モデル**（2026-10-10）: 答案見本の 4 帯を独立初期化 20 seed × 12 点で再現。価数の変化は仮定 |
 | [`pit_groove_model.md`](models/pit_groove_model.md) | 畝–溝モデル（2026-10-10）の結果と限界 |
 | [`images/pit_model_comparison.png`](images/pit_model_comparison.png) | これまでの候補モデル 9 種の比較 |
 | [`images/goal_all_results_one_page.png`](images/goal_all_results_one_page.png) | 空間勾配モデルのサマリー（[`pit_progression_model.md`](models/pit_progression_model.md)） |

@@ -13,7 +13,8 @@
 
 | 文書 | 内容 |
 |---|---|
-| [`models/pit_groove_model.md`](models/pit_groove_model.md) | **畝–溝モデル**（2026-10-10、現在の到達点）。捨てた候補の一覧と比較図も含む |
+| [`models/pit_crypt_model.md`](models/pit_crypt_model.md) | **陰窩分葉モデル**（2026-10-10、現在の到達点）。答案見本の 4 帯を独立初期化 20 seed で再現 |
+| [`models/pit_groove_model.md`](models/pit_groove_model.md) | 畝–溝モデル（2026-10-10、旧ゴール定義での到達点）。捨てた候補の一覧と比較図も含む |
 | [`models/pit_microphase_results.md`](models/pit_microphase_results.md) | 非局所相分離（Ohta–Kawasaki 型）モデルの四形態系列 |
 | [`models/pit_microphase_high_m_results.md`](models/pit_microphase_high_m_results.md) | 同モデルで m を増やしたときの IV_V と反転 spot |
 | [`models/pit_activator_inhibitor_results.md`](models/pit_activator_inhibitor_results.md) | 二場の活性化・抑制モデルの初回結果 |
