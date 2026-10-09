@@ -31,6 +31,13 @@ pit pattern との対応: 座屈相図の「spots → stripes → labyrinth → 
 
 pit pattern との対応: Voronoi パッキングは丸〜多角形の **Type I / II** の腺口モザイクを自然に与え、増殖率の空間的不均一を入れると腺口サイズ・配列の不整（**Type VI**）を作れる。ただし **Type IV の分岐（gyrus）** は点 Voronoi だけでは出しにくい。
 
+この弱点を補う次の候補として、以下を設計した。
+
+- **Cellular Potts Model (CPM)**: 上皮を格子サイト集合として表し、接着エネルギー \(J\) と目標面積制約から、増殖圧・体積排除・間質圧排を直接扱う。最小 PoC は `src/simulate_pit_cpm.py`。
+- **off-lattice 2 成分粒子モデル**: 上皮 E と間質 S の間に種別依存の Morse 相互作用を置き、E 分裂、S 圧排、極性破綻を段階的に加える。最小 PoC は `src/simulate_pit_particles.py`。
+
+両モデルの数式、単一進行度 \(p\) からの係数写像、実装順、失敗条件は [`cell_mechanics_models.md`](cell_mechanics_models.md) を正本とする。
+
 ### (C) 力学 + 移流拡散 の連成（pit pattern を直接対象にした既報）
 
 - Figueiredo IN, et al. "Biomathematical model for simulating abnormal orifice patterns in colonic crypts." *Math. Biosci.* 2019.
@@ -48,10 +55,12 @@ pit pattern との対応: Voronoi パッキングは丸〜多角形の **Type I 
 | --- | --- | --- | --- | --- | --- |
 | 反応拡散 (Gray-Scott) | 化学的 Turing | ○ | △（線が伸びすぎ） | △ | 容易（既存） |
 | 力学的座屈 (Hannezo) | 弾性不安定 | ◎ | ◎ | ○ | 容易（本実装） |
-| 細胞ベース (Voronoi/vertex) | 離散細胞力学 | ◎ | △ | ◎ | 中〜重い |
-| 力学+移流拡散 (Figueiredo) | 増殖-圧力連成 | ○ | ○ | ◎ | 重い |
+| 細胞ベース (Voronoi/vertex) | 離散細胞力学 | ◎ | △ | ◎ | 中〜重い（`simulate_pit_voronoi.py`） |
+| Cellular Potts (CPM) | 接着 + 面積制約 + Monte Carlo | ○（仮説） | ○（仮説） | 未評価 | 中（`simulate_pit_cpm.py`） |
+| off-lattice E/S 粒子 | Morse 力 + 分裂 + 圧排 | ○（仮説） | ○（仮説） | 未評価 | 中（`simulate_pit_particles.py`） |
+| 力学+移流拡散 (Figueiredo) | 増殖-圧力連成 | ○ | ○ | ◎ | 重い（`simulate_pit_figueiredo.py`） |
 
-力学的座屈モデルは、単一機構で Type I→IV→VI の形態進行を最も広くカバーし、numpy だけで軽量に実装できるため、本リポジトリのプロトタイプに採用した。
+力学的座屈モデルは、単一機構で Type I→IV→VI の形態進行を最も広くカバーし、numpy だけで軽量に実装できるため、本リポジトリの第一プロトタイプに採用した。加えて (B) Voronoi/vertex 細胞モデルと (C) Figueiredo 型の力学+移流拡散連成もプロトタイプ実装した（§4, §5）。
 
 ## 3. プロトタイプ実装: 力学的座屈モデル
 
@@ -129,13 +138,69 @@ python3 src/simulate_pit_buckling.py \
 
 すなわち、**反応拡散を使わない力学的座屈モデルでも、Kudo pit pattern の Type I → IV → VI の形態進行を再現できる**。
 
-## 4. 注意点
+## 4. プロトタイプ実装: 細胞ベース Voronoi/vertex モデル
 
-- 本実装は座屈機構の縮約モデルであり、実際の組織弾性・平滑筋分化・細胞増殖を定量的に解いてはいない。あくまで「非反応拡散の自然な機構でも pit pattern が出る」ことを示すプロトタイプである。
+`src/simulate_pit_voronoi.py` は、上皮細胞を離散エージェントとして表現する。
+
+- 六角格子で初期化し、面積弾性 + 細胞間反発で機械的緩和
+- 増殖率に応じて分裂し、Voronoi 稜線（2 近傍距離差）から pit 開口場を抽出
+- 異方性反発で細長い ridge（Type IV 寄り）、増殖率の空間不均一で pit サイズのばらつき（Type VI）
+
+```bash
+python3 src/simulate_pit_voronoi.py --output artifacts/pit_voronoi
+make voronoi
+```
+
+### 4.1 off-lattice E/S Morse 粒子（PoC）
+
+`src/simulate_pit_particles.py` は設計メモ [`cell_mechanics_models.md`](cell_mechanics_models.md) §4 の最小実装。極性は未実装。
+
+```bash
+python3 src/simulate_pit_particles.py --output artifacts/pit_particles
+make particles
+```
+
+## 5. プロトタイプ実装: 力学+移流拡散 (Figueiredo)
+
+`src/simulate_pit_figueiredo.py` は Figueiredo et al. (2019) の 2D 縮約版。
+
+- 増殖細胞密度 `N`: 拡散 + Darcy 移流 `v = -ξ∇p` + ロジスティック増殖
+- 圧力 `p`: 細胞過剰密度から Poisson 型の楕円問題で即時求解
+- 開口変位 `u`: 圧力駆動 + Swift–Hohenberg 型の弾性座屈項
+
+異常増殖の配置（均一 / 中心 focal / inter-cryptal 帯 / 多焦点）で Type I, IIIL, IV, VI 寄りの config を切り替える。
+
+```bash
+python3 src/simulate_pit_figueiredo.py --output artifacts/pit_figueiredo
+make figueiredo
+```
+
+## 6. 注意点
+
+- いずれの実装も縮約モデルであり、実際の組織弾性・平滑筋分化・細胞増殖を定量的に解いてはいない。あくまで「非反応拡散の自然な機構でも pit pattern が出る」ことを示すプロトタイプである。
 - 医学的な Kudo Type の確定判定ではなく、形態 morphology の比較を目的とする点は反応拡散版と同じ。
-- より生物学的に忠実にするなら、(B) の細胞ベースモデルや (C) の力学+移流拡散連成へ発展させる余地がある。
+- Voronoi モデルは Chaste 等の本格的 vertex モデルより大幅に簡略化している。Figueiredo モデルも有限要素版の完全再現ではなく、圧力-移流-変形の連成構造だけを numpy で再現している。
 
-## 5. 主要参考文献
+## 7. 有限長 pit / fission 制約
+
+Gray-Scott、Swift-Hohenberg、座屈縮約モデルはいずれも「場」のモデルなので、Type IV 寄りの stripe / labyrinth が安定すると、1 本の elongated pit が領域全体へ伸びやすい。しかし実際の crypt opening は生物学的な単位構造であり、長さ・面積・周長には事実上の上限がある。異常増殖が進んだ crypt も、既報の crypt fission モデルでは `growth → bifurcation → fission` の段階をたどり、長い 1 本の構造として残るより、くびれて 2 つの crypt に分裂する。
+
+このため `src/pit_fission.py` に共通の component-level fission ルールを追加した。
+
+- pit field を二値化し、connected component と skeleton を計測
+- 面積または skeleton 長が閾値を超えた component を overgrown pit とみなす
+- component の主軸を PCA で推定し、重心付近に主軸と直交する抑制帯を入れる
+- field モデルでは局所的に高さ/占有度を下げ、長い pit の中央に necking を作る
+
+さらにモデル別に以下を入れた。
+
+- `simulate_pit_buckling.py`: 長い stripe の周辺で局所資源を枯渇させ、一定間隔で fission constriction を加える
+- `simulate_pit_figueiredo.py`: pit 負荷が高い場所で増殖率と圧力を飽和させ、圧力駆動の過伸長を抑える
+- `simulate_pit_voronoi.py`: 短すぎる細胞間距離を検出したら、接触を直交方向へ開く T1 transition 風の再配置を行う
+
+これは完全な crypt fission / vertex model ではないが、「branching pit は長く伸び続けるのではなく、局所的に不安定化して分裂する」という制約を各モデルに共通して入れるためのプロトタイプである。
+
+## 8. 主要参考文献
 
 1. Hannezo E, Prost J, Joanny JF. Instabilities of Monolayered Epithelia: Shape and Structure of Villi and Crypts. *Phys Rev Lett* 2011;107:078104.
 2. Shyer AE, Tallinen T, Nerurkar NL, et al. Villification: How the Gut Gets Its Villi. *Science* 2013;342:212–218.

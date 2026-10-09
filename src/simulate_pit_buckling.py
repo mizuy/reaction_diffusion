@@ -48,6 +48,7 @@ from evaluate_pit_steps import (
     render_skeleton_overlay,
     write_metrics,
 )
+from pit_fission import apply_component_fission, local_resource
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,8 @@ class BucklingConfig:
     wavelength_heterogeneity: float = 0.0
     quadratic_heterogeneity: float = 0.0
     anisotropy: float = 0.0
+    resource_depletion: float = 0.0
+    fission_strength: float = 0.0
 
 
 @dataclass
@@ -156,9 +159,19 @@ def run_buckling(
 
     for step in range(1, steps + 1):
         quad = config.quadratic if quadratic_field is None else quadratic_field
-        nonlinear = quad * (u**2) - (u**3)
+        pit = pit_field(u)
+        resource = (
+            local_resource(
+                pit,
+                sigma=max(2.0, config.wavelength / 2.0),
+                depletion=config.resource_depletion,
+            )
+            if config.resource_depletion > 0.0
+            else 1.0
+        )
+        nonlinear = resource * quad * (u**2) - (u**3)
         if growth_field is not None:
-            nonlinear = nonlinear + growth_field * u
+            nonlinear = nonlinear + resource * growth_field * u
 
         if k0_field is None:
             u_hat = np.fft.fft2(u)
@@ -177,6 +190,15 @@ def run_buckling(
             u = (u + dt * du).astype(np.float32)
 
         u = np.clip(u, -3.0, 3.0)
+        if config.fission_strength > 0.0 and step % 25 == 0:
+            u = apply_component_fission(
+                u,
+                pit_field(u),
+                strength=config.fission_strength,
+                max_area_fraction=0.024,
+                max_length_fraction=0.24,
+                band_width=max(1.5, config.wavelength / 9.0),
+            )
         if step in snapshot_steps:
             snapshots.append((step, u.copy()))
 
@@ -228,6 +250,8 @@ def build_suite() -> list[BucklingConfig]:
             wavelength=13.0,
             growth=0.30,
             quadratic=0.0,
+            resource_depletion=2.5,
+            fission_strength=0.35,
         ),
         BucklingConfig(
             name="buckling_pit_iv_herringbone",
@@ -236,6 +260,8 @@ def build_suite() -> list[BucklingConfig]:
             growth=0.30,
             quadratic=0.15,
             anisotropy=0.35,
+            resource_depletion=2.0,
+            fission_strength=0.32,
         ),
         BucklingConfig(
             name="buckling_pit_vi_irregular",
@@ -245,6 +271,8 @@ def build_suite() -> list[BucklingConfig]:
             quadratic=1.0,
             growth_heterogeneity=0.15,
             quadratic_heterogeneity=1.4,
+            resource_depletion=1.4,
+            fission_strength=0.25,
         ),
     ]
 
