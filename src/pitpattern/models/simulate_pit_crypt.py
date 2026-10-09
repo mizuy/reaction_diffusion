@@ -160,12 +160,17 @@ class CryptModel:
     def __init__(self, lat: Lattice, p_field, cfg: Config):
         """p_field(position) -> p; a constant function gives a uniform run."""
         self.lat, self.cfg = lat, cfg
-        self.U = U = Units(lat)
+        self.U = Units(lat)
+        self.set_p(p_field)
+        self.on = np.zeros(len(self.U.verts), bool)
+        self.val = np.zeros(len(lat.x), int)
+
+    def set_p(self, p_field) -> None:
+        """Change the progression field without touching the current state (used by the GUI)."""
+        U, lat = self.U, self.lat
         pu = np.array([params(p_field(c)) for c in U.pos])
         self.gain = np.where(U.is_tri, pu[:, 1], pu[:, 0])
         self.pp = np.array([params(p_field(c)) for c in lat.x])
-        self.on = np.zeros(len(U.verts), bool)
-        self.val = np.zeros(len(lat.x), int)
 
     def randomise(self, rng) -> None:
         self.on = rng.random(len(self.U.verts)) < self.cfg.init_frac

@@ -205,19 +205,255 @@ def render(lat, joins, w, h, dot_d, line_w, blur=4.0, ss=3):
     return np.clip(rgb, 0, 255).astype(np.uint8), binary
 
 
+def build_funnel(rng, lat: Lattice, width, zones, border=14.0, tip_tube=12.0, tip_y=11.5):
+    """Per-crypt units (one unit per dot; density unchanged), as in the funnel picture.
+
+    Each crypt mouth stays centred on its dot and grows into the gaps of the lattice
+    (towards triangle centres = corners of its hexagonal territory):
+      IIIL: a short tube along one gap axis (tips towards one up- and one down-corner),
+      IV_B: a three-armed Y with arms towards three corners of one orientation,
+      IV_V: arms reach the down-corners and join the neighbours' arms (network).
+    Axes / orientations are chosen most-constrained-first so that few corners receive
+    two tips.  Returns a list of segments (x0, y0, x1, y1) to draw on top of the dots.
+    """
+    x = lat.pos[:, 0] + rng.normal(0, border, len(lat.pos))
+    stage = np.rint(np.interp(x / width, zones["x"], zones["p"])).astype(int)
+    use = np.zeros(len(lat.tris), int)          # how many tips point into each corner
+    segs = []
+    up_of = [[t for t in lat.vtris[v] if not lat.down[t]] for v in range(len(lat.pos))]
+    dn_of = [[t for t in lat.vtris[v] if lat.down[t]] for v in range(len(lat.pos))]
+
+    def tip(v, t, length):
+        c = lat.centres[t] - lat.pos[v]
+        return lat.pos[v] + c / np.linalg.norm(c) * length
+
+    def axes(v):  # gap axes: a down-corner and the up-corner opposite to it
+        out = []
+        for td in dn_of[v]:
+            cd = lat.centres[td] - lat.pos[v]
+            best = min(up_of[v], key=lambda tu: np.dot(cd, lat.centres[tu] - lat.pos[v]), default=None)
+            if best is not None:
+                out.append((td, best))
+        return out
+
+    order = [v for v in rng.permutation(len(lat.pos))]
+    # IV_V: arms to all three down-corners, long enough to meet the neighbours there
+    for v in order:
+        if stage[v] == 3:
+            for t in dn_of[v]:
+                segs.append((*lat.pos[v], *lat.centres[t]))
+    # IIIL tubes: choose the axis whose two corners are least used
+    for v in sorted([v for v in order if stage[v] == 1], key=lambda u: rng.random()):
+        ax = axes(v)
+        if not ax:
+            continue
+        td, tu = min(ax, key=lambda a: (use[a[0]] + use[a[1]], rng.random()))
+        use[td] += 1
+        use[tu] += 1
+        segs.append((*tip(v, td, tip_tube - 5.75), *tip(v, tu, tip_tube - 5.75)))
+    # IV_B Ys: choose the orientation (down or up corners) with the least used corners
+    for v in [v for v in order if stage[v] == 2]:
+        opts = [o for o in (dn_of[v], up_of[v]) if len(o) == 3]
+        if not opts:
+            continue
+        ts = min(opts, key=lambda o: (sum(use[t] for t in o), rng.random()))
+        for t in ts:
+            use[t] += 1
+            segs.append((*lat.pos[v], *tip(v, t, tip_y - 5.75)))
+    return segs, stage
+
+
+def render_segments(lat, segs, w, h, dot_d, line_w, blur=4.0, ss=3):
+    m = np.zeros((h * ss, w * ss), np.uint8)
+    for x, y in lat.pos:
+        cv2.circle(m, (int(x * ss), int(y * ss)), int(dot_d / 2 * ss), 1, -1, cv2.LINE_AA)
+    for x0, y0, x1, y1 in segs:
+        cv2.line(m, (int(x0 * ss), int(y0 * ss)), (int(x1 * ss), int(y1 * ss)), 1, int(line_w * ss), cv2.LINE_AA)
+    small = cv2.resize(m.astype(np.float32), (w, h), interpolation=cv2.INTER_AREA)
+    phi = cv2.GaussianBlur(small, (0, 0), blur)
+    ref = np.zeros((61, 61), np.float32)
+    cv2.circle(ref, (30, 30), int(round(dot_d / 2)), 1.0, -1, cv2.LINE_AA)
+    peak = cv2.GaussianBlur(ref, (0, 0), blur).max()
+    xq = np.clip((phi / peak - 0.02) / 0.98, 0, 1)
+    tq = xq * xq * (3 - 2 * xq)
+    rgb = RED * (1 - tq[..., None]) + PURPLE * tq[..., None]
+    return np.clip(rgb, 0, 255).astype(np.uint8), phi > 0.5 * peak
+
+
+class ExpandingLattice:
+    """Crypt centres whose spacing a(x) grows with progression (surface expansion of a
+    protruding lesion): soft-repulsion relaxation from random positions with a
+    position-dependent range, so dislocations appear where the spacing changes.
+    Triangles come from the Delaunay triangulation."""
+
+    def __init__(self, rng, w, h, a_of_x, steps=900, margin=60):
+        self.w, self.h = w, h
+        xs = np.linspace(-margin, w + margin, 400)
+        dens = 2 / (np.sqrt(3) * a_of_x(xs) ** 2)
+        n = int(np.trapezoid(dens, xs) * (h + 2 * margin))
+        cdf = np.cumsum(dens)
+        cdf /= cdf[-1]
+        x = np.stack([np.interp(rng.random(n), cdf, xs), rng.uniform(-margin, h + margin, n)], 1)
+        lo, hi = np.array([-margin, -margin]), np.array([w + margin, h + margin])
+        for it in range(steps):
+            d = x[:, None, :] - x[None, :, :]
+            r = np.sqrt((d ** 2).sum(-1)) + np.eye(n) * 1e9
+            a_loc = a_of_x(x[:, 0])
+            rng_ij = 1.15 * 0.5 * (a_loc[:, None] + a_loc[None, :])
+            f = np.clip(rng_ij - r, 0, None) / r
+            x += 0.25 * (d * f[..., None]).sum(1) + rng.normal(0, 1.5 * (1 - it / steps), x.shape)
+            x = np.clip(x, lo, hi)
+        self.pos = x
+        self.a_loc = a_of_x(x[:, 0])
+        sub = cv2.Subdiv2D((int(lo[0]) - 5, int(lo[1]) - 5, int(hi[0] - lo[0]) + 10, int(hi[1] - lo[1]) + 10))
+        for px, py in x:
+            sub.insert((float(px), float(py)))
+        key = {(round(px, 3), round(py, 3)): i for i, (px, py) in enumerate(x)}
+        tris = []
+        for t in sub.getTriangleList():
+            ids = [key.get((round(float(t[2 * k]), 3), round(float(t[2 * k + 1]), 3))) for k in range(3)]
+            if None in ids:
+                continue
+            P = x[ids]
+            e = [np.linalg.norm(P[0] - P[1]), np.linalg.norm(P[1] - P[2]), np.linalg.norm(P[0] - P[2])]
+            if max(e) > 1.5 * self.a_loc[ids].mean():
+                continue  # hull slivers
+            tris.append(tuple(ids))
+        self.tris = tris
+        self.centres = np.array([x[list(t)].mean(0) for t in tris])
+        self.vtris = [[] for _ in x]
+        for ti, t in enumerate(tris):
+            for v in t:
+                self.vtris[v].append(ti)
+        edge_tris = {}
+        for ti, t in enumerate(tris):
+            for e in ((t[0], t[1]), (t[1], t[2]), (t[0], t[2])):
+                edge_tris.setdefault(tuple(sorted(e)), []).append(ti)
+        self.tri_adj = [set() for _ in tris]
+        for ts in edge_tris.values():
+            for a_ in ts:
+                self.tri_adj[a_].update(b for b in ts if b != a_)
+
+
+def build_expanding(rng, lat: ExpandingLattice, width, zones, border=14.0, f_tube=0.62, f_y=0.42):
+    """One unit per crypt: IIIL tube along a gap axis, IV_B Y to alternate corners,
+    IV_V arms to an independent set of corners shared with the neighbours (network)."""
+    x = lat.pos[:, 0] + rng.normal(0, border, len(lat.pos))
+    stage = np.rint(np.interp(x / width, zones["x"], zones["p"])).astype(int)
+    segs, use = [], np.zeros(len(lat.tris), int)
+
+    def corners(v):  # this crypt's corners sorted by angle
+        ts = lat.vtris[v]
+        ang = [np.arctan2(*(lat.centres[t] - lat.pos[v])[::-1]) for t in ts]
+        return [t for _, t in sorted(zip(ang, ts))]
+
+    def tip(v, t, f):
+        return lat.pos[v] + f * (lat.centres[t] - lat.pos[v])
+
+    # IV_V: an independent set of corners (no two chosen corners share an edge), grown by
+    # BFS through "second neighbours" (corners sharing only a vertex, on the other side of
+    # it) so that one sublattice is picked over large domains -> regular islands
+    chosen = np.zeros(len(lat.tris), bool)
+    in_v = np.array([sum(stage[v] == 3 for v in t) >= 2 for t in lat.tris])
+    second = [set() for _ in lat.tris]   # same-sublattice corners: two steps around a shared vertex
+    for v in range(len(lat.pos)):
+        ts = lat.vtris[v]
+        if len(ts) < 4:
+            continue
+        ang = [np.arctan2(*(lat.centres[t] - lat.pos[v])[::-1]) for t in ts]
+        ring = [t for _, t in sorted(zip(ang, ts))]
+        m = len(ring)
+        for i, t in enumerate(ring):
+            second[t].update((ring[(i + 2) % m], ring[(i - 2) % m]))
+    seen = np.zeros(len(lat.tris), bool)
+    for start in rng.permutation(np.flatnonzero(in_v)):
+        if seen[start]:
+            continue
+        queue = [start]
+        seen[start] = True
+        while queue:
+            t = queue.pop(0)
+            if not any(chosen[u] for u in lat.tri_adj[t]):
+                chosen[t] = True
+                for u in second[t]:
+                    if in_v[u] and not seen[u]:
+                        seen[u] = True
+                        queue.append(u)
+    for t in np.flatnonzero(chosen):
+        for v in lat.tris[t]:
+            if stage[v] == 3:
+                segs.append((*lat.pos[v], *lat.centres[t]))
+    order = list(rng.permutation(len(lat.pos)))
+    # IV_B: three arms towards alternate neighbours (edge directions).  Each edge may carry
+    # one arm only; there are 3 edges per crypt, so alternate triples can tile without contact.
+    nbrs = [set() for _ in lat.pos]
+    for t in lat.tris:
+        for i in t:
+            nbrs[i].update(j for j in t if j != i)
+    claimed = set()
+    todo = [v for v in order if stage[v] == 2]
+    while todo:
+        best = None
+        for v in todo:
+            ns = sorted(nbrs[v], key=lambda j: np.arctan2(*(lat.pos[j] - lat.pos[v])[::-1]))
+            if len(ns) < 5:
+                continue
+            for k in (0, 1):
+                trip = ns[k::2][:3]
+                cost = sum((min(v, j), max(v, j)) in claimed for j in trip)
+                key = (cost, rng.random())
+                if best is None or key < best[0]:
+                    best = (key, v, trip)
+        if best is None:
+            break
+        _, v, trip = best
+        todo.remove(v)
+        for j in trip:
+            claimed.add((min(v, j), max(v, j)))
+            segs.append((*lat.pos[v], *(lat.pos[v] + f_y * (lat.pos[j] - lat.pos[v]))))
+    for v in [v for v in order if stage[v] == 1]:
+        cs = corners(v)
+        m = len(cs)
+        if m < 4:
+            continue
+        axes = [(cs[k], cs[(k + m // 2) % m]) for k in range(m)]
+        t1, t2 = min(axes, key=lambda a: (use[a[0]] + use[a[1]], rng.random()))
+        use[t1] += 1
+        use[t2] += 1
+        segs.append((*tip(v, t1, f_tube), *tip(v, t2, f_tube)))
+    return segs, stage
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--out", type=Path, default=ROOT / "docs/images/pit_ideal_sweep.png")
     p.add_argument("--compare", type=Path, default=ROOT / "docs/images/pit_ideal_sweep_compare.png")
     p.add_argument("--seed", type=int, default=2)
+    p.add_argument("--style", choices=["pairs", "funnel", "expand"], default="pairs",
+                   help="pairs: tubes/Ys join 2/3 dots (density halves); funnel: one tube / Y per dot (density kept)")
     a = p.parse_args()
     rng = np.random.default_rng(a.seed)
     W, H = 1002, 497
     spacing, dot_d, line_w = 27.5, 14.5, 11.5  # matched to goal_rd_sweep_i_to_iv.png (NN 27.4 px)
     lat = Lattice(rng, W, H, spacing)
     zones = dict(x=[0.0, 0.24, 0.26, 0.49, 0.51, 0.74, 0.76, 1.0], p=[0, 0.49, 1, 1.49, 2, 2.49, 3, 3])
-    joins, stage = build(rng, lat, W, H, zones)
-    rgb, binary = render(lat, joins, W, H, dot_d, line_w)
+    if a.style == "expand":
+        a_of_x = lambda xx: np.interp(np.asarray(xx) / W, [0.0, 0.18, 0.34, 0.55, 1.0],
+                                      [spacing, spacing, 1.45 * spacing, 1.6 * spacing, 1.6 * spacing])
+        lat = ExpandingLattice(rng, W, H, a_of_x)
+        segs, stage = build_expanding(rng, lat, W, zones)
+        rgb, binary = render_segments(lat, segs, W, H, dot_d, 12.5)
+        Image.fromarray(rgb).save(a.out)
+        print("saved", a.out, "crypts per band (I, IIIL, IV_B, IV_V):",
+              [int(((stage == k) & (lat.pos[:, 0] > 0) & (lat.pos[:, 0] < W)).sum()) for k in range(4)])
+        return
+    elif a.style == "funnel":
+        segs, stage = build_funnel(rng, lat, W, zones)
+        rgb, binary = render_segments(lat, segs, W, H, dot_d, line_w)
+        joins = []
+    else:
+        joins, stage = build(rng, lat, W, H, zones)
+        rgb, binary = render(lat, joins, W, H, dot_d, line_w)
     Image.fromarray(rgb).save(a.out)
 
     # comparison: original (mirrored so that Type I is on the left) above the corrected drawing

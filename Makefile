@@ -2,7 +2,7 @@ PYTHON = uv run python
 SRC = src/pitpattern
 
 .PHONY: setup test target-figures model-comparison \
-	pit-crypt-explore pit-crypt-validate pit-crypt-sweep pit-crypt-figures \
+	pit-crypt-explore pit-crypt-validate pit-crypt-sweep pit-crypt-figures crypt-gui \
 	pit-groove-explore pit-groove-validate \
 	goal-figures voronoi cpm particles figueiredo buckling \
 	pit-goal-spatial pit-goal-smoke pit-goal-sweep pit-goal-ramp pit-goal-compare pit-goal-robustness \
@@ -41,6 +41,9 @@ pit-crypt-sweep:
 
 pit-crypt-figures:
 	${PYTHON} ${SRC}/figures/make_pit_crypt_figures.py
+
+crypt-gui:
+	${PYTHON} -m pitpattern.apps.crypt_gui
 
 # ---------------------------------------------------------------- crest-groove model (docs/models/pit_groove_model.md)
 GROOVE_DRIVES = -0.40 -0.375 -0.35 -0.30 -0.25 -0.20 -0.15 -0.125 -0.10 -0.075 -0.05 -0.025 0.0 0.0125 0.025 0.0375 0.05 0.075 0.10 0.125 0.15 0.20
