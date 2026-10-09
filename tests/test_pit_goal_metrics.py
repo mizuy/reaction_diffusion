@@ -13,7 +13,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from pit_goal_metrics import (  # noqa: E402
+from pitpattern.metrics.pit_goal_metrics import (  # noqa: E402
     classify_morphology,
     evaluate_goal_sequence,
     measure_goal_pattern,

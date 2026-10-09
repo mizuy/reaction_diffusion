@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from simulate_pit_ring import Parameters, Ring, minimize
+from pitpattern.models.simulate_pit_ring import Parameters, Ring, minimize
 
 
 def test_circle_geometry_and_bending():

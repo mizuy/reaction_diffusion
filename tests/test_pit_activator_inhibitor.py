@@ -5,7 +5,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from simulate_pit_activator_inhibitor import (  # noqa: E402
+from pitpattern.models.simulate_pit_activator_inhibitor import (  # noqa: E402
     ActivatorInhibitorConfig,
     homogeneous_equilibrium,
     linear_growth_rates,

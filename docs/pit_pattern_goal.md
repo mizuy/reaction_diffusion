@@ -15,13 +15,13 @@ Type I  →  Type IIIL  →  Type IV_B  →  Type IV_V
 **の順に変わる。変わるのはつながり方（点 → 短管 → Y → 網）だけで、pit の太さと間隔は変わらない。**
 
 - 「Type らしい絵を別々の設定で描く」ことではない。スライド 6 の「I → IIIL → IV_B → IV_V の変化は連続的に表現できる」が本質。
-- **独立初期化での再現性が必須**。共通の規則で作った複数のランダム初期条件から、同じ \(p\) 区間で同じ形態が出ること（画素配置の一致は求めない）。前の形態を引き継ぐ continuation や空間勾配の 1 枚だけでは合格にしない。固定の不均一場を使う場合は、その seed を初期条件と独立に変え、不均一性なしの対照も置く。手順は [独立初期化 protocol](pit_independent_initialization_protocol.md)。
+- **独立初期化での再現性が必須**。共通の規則で作った複数のランダム初期条件から、同じ \(p\) 区間で同じ形態が出ること（画素配置の一致は求めない）。前の形態を引き継ぐ continuation や空間勾配の 1 枚だけでは合格にしない。固定の不均一場を使う場合は、その seed を初期条件と独立に変え、不均一性なしの対照も置く。手順は [独立初期化 protocol](protocols/pit_independent_initialization_protocol.md)。
 
 ## 2. 答案見本
 
 ![答案見本: I→IIIL→IV_B→IV_V](images/pit_ideal_sweep.png)
 
-*左から I → IIIL → IV_B → IV_V。紫 = pit・溝、赤 = 粘膜。プログラムによる描画で、シミュレーション結果ではない（[`src/make_pit_ideal_sweep.py`](../src/make_pit_ideal_sweep.py)）。点の間隔 27.5 px、紫の太さ 12–14 px、色はスライド 6 の実測値。*
+*左から I → IIIL → IV_B → IV_V。紫 = pit・溝、赤 = 粘膜。プログラムによる描画で、シミュレーション結果ではない（[`src/pitpattern/figures/make_pit_ideal_sweep.py`](../src/pitpattern/figures/make_pit_ideal_sweep.py)）。点の間隔 27.5 px、紫の太さ 12–14 px、色はスライド 6 の実測値。*
 
 | 帯 | 目標像 |
 |---|---|
@@ -53,7 +53,7 @@ Type I  →  Type IIIL  →  Type IV_B  →  Type IV_V
 
 ### 3.2 定量の目安（暫定）
 
-\(w_0\) = Type I 領域の `feature_width_median`。指標の実装は [`src/pit_goal_metrics.py`](../src/pit_goal_metrics.py)、三叉の数え方は [`src/pit_fork_metrics.py`](../src/pit_fork_metrics.py)（既存の 8 近傍次数による検出は斜めの管の骨格の階段を誤認するため）。
+\(w_0\) = Type I 領域の `feature_width_median`。指標の実装は [`src/pitpattern/metrics/pit_goal_metrics.py`](../src/pitpattern/metrics/pit_goal_metrics.py)、三叉の数え方は [`src/pitpattern/metrics/pit_fork_metrics.py`](../src/pitpattern/metrics/pit_fork_metrics.py)（既存の 8 近傍次数による検出は斜めの管の骨格の階段を誤認するため）。
 
 | 指標 | I | IIIL | IV_B | IV_V |
 |---|---|---|---|---|
@@ -98,8 +98,8 @@ Type II / II-L / II-O、III_H、IV_H（シダの葉・松毬様）、Type VI / V
 
 | ファイル | 内容 |
 |---|---|
-| [`pit_groove_model.md`](pit_groove_model.md) | 畝–溝モデル（2026-10-10）の結果と限界 |
+| [`pit_groove_model.md`](models/pit_groove_model.md) | 畝–溝モデル（2026-10-10）の結果と限界 |
 | [`images/pit_model_comparison.png`](images/pit_model_comparison.png) | これまでの候補モデル 9 種の比較 |
-| [`images/goal_all_results_one_page.png`](images/goal_all_results_one_page.png) | 空間勾配モデルのサマリー（[`pit_progression_model.md`](pit_progression_model.md)） |
+| [`images/goal_all_results_one_page.png`](images/goal_all_results_one_page.png) | 空間勾配モデルのサマリー（[`pit_progression_model.md`](models/pit_progression_model.md)） |
 
 臨床写真・文献図を加えるときは出典を明記し、形態の参考であって診断の根拠ではないと添える。手段（飽和・座屈・fission など）がゴールを再定義しないこと。

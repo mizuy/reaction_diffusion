@@ -17,9 +17,9 @@ Type II と Type VN は、この段階では評価対象から外す。
 
 設計の背景・Type IV の力学診断は次の設計メモを参照する。
 
-- 反応飽和・環境場 **C**（Step 1〜3, 1c）: [`pit_type_iv_saturation_environment_concept.md`](pit_type_iv_saturation_environment_concept.md)
-- 局所インヒビター場 **H**（Step 4）: [`pit_type_iv_local_inhibitor_concept.md`](pit_type_iv_local_inhibitor_concept.md)
-- bistable plateau **W**（Step 5・幅の固定）: [`pit_type_iv_bistable_width_concept.md`](pit_type_iv_bistable_width_concept.md)
+- 反応飽和・環境場 **C**（Step 1〜3, 1c）: [`pit_type_iv_saturation_environment_concept.md`](concepts/pit_type_iv_saturation_environment_concept.md)
+- 局所インヒビター場 **H**（Step 4）: [`pit_type_iv_local_inhibitor_concept.md`](concepts/pit_type_iv_local_inhibitor_concept.md)
+- bistable plateau **W**（Step 5・幅の固定）: [`pit_type_iv_bistable_width_concept.md`](concepts/pit_type_iv_bistable_width_concept.md)
 
 ## 現在の基本モデル
 
@@ -48,7 +48,7 @@ VI 不整については、さまざまな pit を幾何的に混ぜるのでは
 
 ## Step ごとの仮説
 
-評価スクリプト `src/evaluate_pit_steps.py` は、同じ初期ゆらぎから以下の variant を走らせる。
+評価スクリプト `src/pitpattern/metrics/evaluate_pit_steps.py` は、同じ初期ゆらぎから以下の variant を走らせる。
 
 ### Step 0: Type IV baseline
 
@@ -90,7 +90,7 @@ B_t = dB Laplacian(B) + R(A, B) - (k + f)B - mu B^3
 
 ### Step 1c: 飽和・cubic の追い込み
 
-`step1b` の派生として、B 芯をさらに抑える 3 variant（`step1c_a` / `step1c_b` / `step1c_c`）を比較した。数式・実測・**step1c_c / step3 が有望に見える理由**は [`pit_type_iv_saturation_environment_concept.md`](pit_type_iv_saturation_environment_concept.md) を参照。
+`step1b` の派生として、B 芯をさらに抑える 3 variant（`step1c_a` / `step1c_b` / `step1c_c`）を比較した。数式・実測・**step1c_c / step3 が有望に見える理由**は [`pit_type_iv_saturation_environment_concept.md`](concepts/pit_type_iv_saturation_environment_concept.md) を参照。
 
 要約:
 
@@ -102,7 +102,7 @@ B_t = dB Laplacian(B) + R(A, B) - (k + f)B - mu B^3
 
 ### Step 1d: 空間飽和（q_core / q_tip）と不応 R
 
-楔形 IIIL 分岐を「先端だけ低 q・芯は高 q」に分離し、迷路化を **不応 R**（古い芯の kill、core マスク内のみ）で抑える段階。数式・スイープ・限界は [`pit_type_iv_saturation_environment_concept.md`](pit_type_iv_saturation_environment_concept.md) の **Step 1d** 節を参照。
+楔形 IIIL 分岐を「先端だけ低 q・芯は高 q」に分離し、迷路化を **不応 R**（古い芯の kill、core マスク内のみ）で抑える段階。数式・スイープ・限界は [`pit_type_iv_saturation_environment_concept.md`](concepts/pit_type_iv_saturation_environment_concept.md) の **Step 1d** 節を参照。
 
 ```text
 q_eff = q_core  on flat high-B core
@@ -150,7 +150,7 @@ k(x, y) = k0 + sk C(x, y)
 
 ### Step 3: 動的な環境場 C
 
-`step3_pit_vi_dynamic_environment`: `C` を **B と結合した遅い変数** にし、`f,k` を局所で書き換える（**B → C → (f,k) → B**）。Type VI 不整（複数 regime 共存）の候補。詳細・実測表は [`pit_type_iv_saturation_environment_concept.md`](pit_type_iv_saturation_environment_concept.md)。
+`step3_pit_vi_dynamic_environment`: `C` を **B と結合した遅い変数** にし、`f,k` を局所で書き換える（**B → C → (f,k) → B**）。Type VI 不整（複数 regime 共存）の候補。詳細・実測表は [`pit_type_iv_saturation_environment_concept.md`](concepts/pit_type_iv_saturation_environment_concept.md)。
 
 ```text
 C_t = epsilon (Dc Laplacian(C) + alpha (B - mean(B)) - beta C)
@@ -183,7 +183,7 @@ H_t = dH Laplacian(H) + rho B - delta H        ( dH >> dB )
 
 Step 0〜4 で繰り返し現れた問題は、`(f, k)` が **stripe の幅・振幅・被覆率・波長・morphology を同時に決めてしまう**ことだった。幅が「やわらかいモード」として摂動を吸収するため、`(f, k)` を動かしても分岐ではなく太さの変化に逃げてしまう。
 
-Step 5 は「幅・間隔・被覆を別々のメカニズムで固定し、変動を topology(分岐・伸長)へ流す」方針をとる。提案 **W** の詳細（問題の診断・数式・パラメータ・実測）は [`pit_type_iv_bistable_width_concept.md`](pit_type_iv_bistable_width_concept.md) を参照。
+Step 5 は「幅・間隔・被覆を別々のメカニズムで固定し、変動を topology(分岐・伸長)へ流す」方針をとる。提案 **W** の詳細（問題の診断・数式・パラメータ・実測）は [`pit_type_iv_bistable_width_concept.md`](concepts/pit_type_iv_bistable_width_concept.md) を参照。
 
 提案 W（bistable plateau, `step5_pit_iv_bistable_width`）:
 
@@ -290,13 +290,13 @@ fields_*.png
 ## 実行例
 
 ```bash
-python3 src/evaluate_pit_steps.py --output artifacts/pit_step_eval
+python3 src/pitpattern/metrics/evaluate_pit_steps.py --output artifacts/pit_step_eval
 ```
 
 軽い確認:
 
 ```bash
-python3 src/evaluate_pit_steps.py \
+python3 src/pitpattern/metrics/evaluate_pit_steps.py \
   --output artifacts/pit_step_eval_smoke \
   --suite steps \
   --size 96 \

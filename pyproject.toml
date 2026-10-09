@@ -1,7 +1,7 @@
 [project]
 name = "reaction-diffusion"
 version = "0.1.0"
-description = "Add your description here"
+description = "Simulations, metrics and figures for colorectal pit-pattern progression (Type I -> IIIL -> IV_B -> IV_V)"
 authors = [
     { name = "MIZUGUCHI Yasuhiko", email = "mizugy@gmail.com" }
 ]
@@ -10,6 +10,7 @@ dependencies = [
     "pygame-gui>=0.6.14",
     "numpy>=1.26.4",
     "opencv-python>=4.9.0.80",
+    "pillow>=10.0",
 ]
 requires-python = ">= 3.10"
 
@@ -32,4 +33,8 @@ dev = [
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/reaction_diffusion"]
+packages = ["src/pitpattern"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

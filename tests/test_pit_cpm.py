@@ -12,7 +12,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from simulate_pit_cpm import (  # noqa: E402
+from pitpattern.models.simulate_pit_cpm import (  # noqa: E402
     CPMConfig,
     copy_delta_energy,
     energy_terms,

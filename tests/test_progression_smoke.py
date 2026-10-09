@@ -10,8 +10,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from pit_goal_metrics import classify_morphology, measure_goal_pattern  # noqa: E402
-from simulate_pit_progression import (  # noqa: E402
+from pitpattern.metrics.pit_goal_metrics import classify_morphology, measure_goal_pattern  # noqa: E402
+from pitpattern.models.simulate_pit_progression import (  # noqa: E402
     ProgressionModel,
     ProgressionSettings,
     coeffs_from_progression,

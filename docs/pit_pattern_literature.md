@@ -1,6 +1,6 @@
 # pit pattern（工藤分類）文献レビュー
 
-このドキュメントは、本リポジトリの反応拡散モデル（`src/pit.py` および評価スクリプト `src/evaluate_pit_steps.py`）が再現対象としている「pit pattern」について文献を調査し、その定義・形態・臨床的意義を整理したものである。モデル評価の考え方は `docs/pit_model_evaluation.md` にあり、本ドキュメントはその医学的背景を補完する。
+このドキュメントは、本リポジトリの反応拡散モデル（`legacy/pit.py` および評価スクリプト `src/pitpattern/metrics/evaluate_pit_steps.py`）が再現対象としている「pit pattern」について文献を調査し、その定義・形態・臨床的意義を整理したものである。モデル評価の考え方は `docs/pit_model_evaluation.md` にあり、本ドキュメントはその医学的背景を補完する。
 
 ## 1. pit pattern とは何か
 
@@ -63,7 +63,7 @@ pit pattern を反応拡散で扱うことには、単なる図形マッチン�
 
 ## 5. 本リポジトリのモデルとの対応
 
-`src/evaluate_pit_steps.py` の各 config は、上記の理解を踏まえて次のように pit pattern に対応づけられている。
+`src/pitpattern/metrics/evaluate_pit_steps.py` の各 config は、上記の理解を踏まえて次のように pit pattern に対応づけられている。
 
 - `reference_pit_i`（feed=0.055, k=0.062）: 規則的な spot → Type I 相当
 - `reference_pit_iii`（feed=0.045, k=0.066）: 小〜大の spot / short tubular → Type III 相当

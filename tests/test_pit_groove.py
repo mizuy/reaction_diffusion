@@ -6,9 +6,9 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from evaluate_pit_groove import label, wilson
-from pit_fork_metrics import fork_metrics
-from simulate_pit_groove import Config, GrooveModel, pit_binary
+from pitpattern.evaluation.evaluate_pit_groove import label, wilson
+from pitpattern.metrics.pit_fork_metrics import fork_metrics
+from pitpattern.models.simulate_pit_groove import Config, GrooveModel, pit_binary
 
 
 def test_fork_counter_y_disk_and_diagonal_line():

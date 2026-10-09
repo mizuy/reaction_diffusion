@@ -3,8 +3,8 @@ from pathlib import Path
 import numpy as np
 import cv2
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
-from simulate_pit_microphase import Config,Microphase
-from pit_microphase_metrics import periodic_labels,measure
+from pitpattern.models.simulate_pit_microphase import Config,Microphase
+from pitpattern.metrics.pit_microphase_metrics import periodic_labels,measure
 
 def test_periodic_component_merges_seam():
     b=np.zeros((24,24),np.uint8);b[8:15,:3]=1;b[8:15,-3:]=1
