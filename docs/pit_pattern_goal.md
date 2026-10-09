@@ -89,7 +89,7 @@ Type II / II-L / II-O、III_H、IV_H（シダの葉・松毬様）、Type VI / V
 | [`images/pit_ideal_sweep.png`](images/pit_ideal_sweep.png) | 答案見本（まずこれと見比べる）。比較図 [`pit_ideal_sweep_compare.png`](images/pit_ideal_sweep_compare.png) |
 | [`images/goal_rd_sweep_i_to_iv.png`](images/goal_rd_sweep_i_to_iv.png) | スライド 6。右端 = I、左端 = IV_V。中ほどの伸び続けるストライプは目標外 |
 | [`images/pit_reference_sheet.png`](images/pit_reference_sheet.png) | 手元の実画像（工藤分類表・鋸歯状病変）の参照シート |
-| [`images/anti_goal_*.png`](images/) | 反例（§3.3） |
+| [`images/anti_goal_*.png`](images) | 反例（§3.3） |
 | [`serrated_pitpattern.pptx`](serrated_pitpattern.pptx) | 鋸歯状 pit の整理スライド |
 
 旧版の見本 [`goal_target_sweep.png`](images/goal_target_sweep.png) と [`goal_schematic_i_iiil_ivb_ivv.png`](images/goal_schematic_i_iiil_ivb_ivv.png) は、IV_V を迷路として描いているため規範から外した（2026-10-10）。

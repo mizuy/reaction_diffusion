@@ -21,6 +21,12 @@
 | [`models/pit_progression_model.md`](models/pit_progression_model.md) | Swift–Hohenberg 系の連続遷移モデル（空間勾配版を含む）の設計メモ |
 | [`models/non_reaction_diffusion_models.md`](models/non_reaction_diffusion_models.md) | 反応拡散以外（座屈・Voronoi など）のモデル |
 | [`models/cell_mechanics_models.md`](models/cell_mechanics_models.md) | 細胞力学モデル（CPM・off-lattice 粒子）の設計メモ |
+| [`models/dbm-v1-report.md`](models/dbm-v1-report.md) | Laplacian growth（DBM）pit モデル v1: 見た目の改善と初回動画 |
+| [`models/dbm-v2-report.md`](models/dbm-v2-report.md) | DBM v2: 樹枝状の IV branching、丸い villous 島、約 200 個の Type I |
+| [`models/gs-sweep-v1-report.md`](models/gs-sweep-v1-report.md) | Gray–Scott (f,k) 経路掃引による 4 相動画 v1 |
+| [`models/gs-sweep-v2-report.md`](models/gs-sweep-v2-report.md) | 同 v2: IV branching の改善と単調スケジュール化 |
+| [`models/gs-sweep-v3-diffratio-report.md`](models/gs-sweep-v3-diffratio-report.md) | 同 v3: 拡散比 dB/dA を変えて Y 分岐は増えるか |
+| [`models/gs-sweep-v3-aniso-report.md`](models/gs-sweep-v3-aniso-report.md) | 同 v3 候補 2: 拡散の空間ゆらぎ・非等方性で Y 分岐は増えるか |
 
 ## protocols/ — 検証の手順
 
@@ -38,6 +44,9 @@
 | [`concepts/pit_type_iv_bistable_width_concept.md`](concepts/pit_type_iv_bistable_width_concept.md) | Type IV の幅制御（bistable plateau） |
 | [`concepts/pit_type_iv_local_inhibitor_concept.md`](concepts/pit_type_iv_local_inhibitor_concept.md) | 局所インヒビター場による長さスケール制御 |
 | [`concepts/pit_type_iv_saturation_environment_concept.md`](concepts/pit_type_iv_saturation_environment_concept.md) | 反応飽和・環境場による Type IV / VI |
+| [`concepts/feasibility-and-approach.md`](concepts/feasibility-and-approach.md) | 4 相の 1 パラメータ再現: 実現可能性診断と方針提案 |
+| [`concepts/branching-mechanism-design.md`](concepts/branching-mechanism-design.md) | 分岐機構の設計と 128² プロトタイプ比較（有限長で止まり先端が分岐するか） |
+| [`concepts/laplacian-growth-feasibility.md`](concepts/laplacian-growth-feasibility.md) | Laplacian growth（DBM）による 4 相再現の実現可能性 |
 
 ## images/
 
