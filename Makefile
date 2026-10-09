@@ -19,6 +19,7 @@ test:
 
 # ---------------------------------------------------------------- goal and reference figures (docs/images)
 target-figures:
+	${PYTHON} ${SRC}/figures/make_pit_gyrus_sweep.py
 	${PYTHON} ${SRC}/figures/make_pit_ideal_sweep.py
 	${PYTHON} ${SRC}/figures/make_pit_reference_sheet.py
 	${PYTHON} ${SRC}/figures/make_pit_target_schema.py

@@ -1,9 +1,9 @@
 # reaction_diffusion — 大腸 pit pattern の形態シミュレーション
 
-拡大内視鏡で見る大腸 pit pattern（工藤分類）の進行 **Type I → IIIL → IV_B → IV_V** を、1 本の連続パラメータで再現するモデルを探すプロジェクト。
+拡大内視鏡で見る大腸 pit pattern（工藤分類）の進行 **Round (I) → Elongated (IIIL) → Branch (IV_B) → Gyrus → Villous (IV_V)** を、1 本の連続パラメータで再現するモデルを探すプロジェクト。
 
-- **ゴール（まず読む）**: [`docs/pit_pattern_goal.md`](docs/pit_pattern_goal.md)。答案見本は [`docs/images/pit_ideal_sweep.png`](docs/images/pit_ideal_sweep.png)
-- **現在の到達点**: 陰窩分葉モデル [`docs/models/pit_crypt_model.md`](docs/models/pit_crypt_model.md)（答案見本の 4 帯を再現）
+- **ゴール（まず読む）**: [`docs/pit_pattern_goal.md`](docs/pit_pattern_goal.md)。答案見本は [`docs/images/pit_gyrus_sweep.png`](docs/images/pit_gyrus_sweep.png)
+- **現在の到達点**: 陰窩分葉モデル [`docs/models/pit_crypt_model.md`](docs/models/pit_crypt_model.md)（旧答案見本の 4 帯を再現。現行の 5 段階の答案見本に対応するモデルは未作成）
 - **文書の一覧**: [`docs/README.md`](docs/README.md)
 
 ## セットアップ
