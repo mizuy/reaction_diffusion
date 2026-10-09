@@ -73,3 +73,13 @@ pit-microphase-validate: pit-microphase
 
 pit-activator-inhibitor:
 	${PYTHON} src/simulate_pit_activator_inhibitor.py
+
+GROOVE_DRIVES = -0.40 -0.375 -0.35 -0.30 -0.25 -0.20 -0.15 -0.125 -0.10 -0.075 -0.05 -0.025 0.0 0.0125 0.025 0.0375 0.05 0.075 0.10 0.125 0.15 0.20
+
+pit-groove-explore:
+	${PYTHON} src/simulate_pit_groove.py sweep --output artifacts/pit_groove/explore --seeds 1 7 42 --steps 8000 --checkpoints 1 --drives ${GROOVE_DRIVES}
+
+pit-groove-validate:
+	for s in $$(seq 100 119); do ${PYTHON} src/simulate_pit_groove.py sweep --output artifacts/pit_groove/validation/seed$$s --seeds $$s --steps 8000 --checkpoints 1 --drives ${GROOVE_DRIVES}; done
+	${PYTHON} src/evaluate_pit_groove.py 'artifacts/pit_groove/validation/seed*/metrics.csv' --w0 6.13 --json artifacts/pit_groove/validation/summary.json
+	${PYTHON} src/make_pit_groove_figures.py

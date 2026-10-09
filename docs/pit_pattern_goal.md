@@ -30,17 +30,36 @@ Type I  →  Type III（とくに IIIL）  →  Type IV_B（branching）  →  T
 スライド 6 の文言どおり、**「I → IIIL → IV_B → IV_V の変化は連続的に表現できる」**ことが本質である。  
 「Type っぽい絵を別々の config で描く」ことではない。
 
-合成ターゲット（答案見本・線幅一定）:
+### 2026-10-10改訂: 答案見本を差し替え、IV_V を「I の明暗反転」と定める
 
-![合成ターゲット: I→IIIL→IV_B→IV_V（線幅一定）](images/goal_target_sweep.png)
+**答案見本（現行）**: スライド 6 の反応拡散スイープの太さ・間隔・規則的な並び・質感はそのまま保ち、IIIL と IV_B の単位が伸び続けずに止まるよう描き直したもの。
 
-*プログラム描画によるゴール見本（`make goal-figures`）。幅は全域で一定。変わるのは位相（点→短管→短い分岐→密な迷路／脳回網）だけ。*
+![答案見本: I→IIIL→IV_B→IV_V（スライド6の太さ・間隔のまま、単位は伸び続けない）](images/pit_ideal_sweep.png)
 
-臨床・文献側の参照（pptx スライド 6）:
+*左から I → IIIL → IV_B → IV_V。紫が pit・溝、赤が粘膜。プログラムによる描画であり、シミュレーション結果ではない（`src/make_pit_ideal_sweep.py`）。点の間隔 27.5 px、紫の太さ 12–14 px、色はスライド 6 の実測値。上下比較は [`pit_ideal_sweep_compare.png`](images/pit_ideal_sweep_compare.png)。*
+
+| 帯 | 目標像 |
+|---|---|
+| I | 赤地に紫の丸い点が三角格子状に規則的に並ぶ |
+| IIIL | **帯の中の点はほぼすべて**、隣の点 1 つとだけつながった**まっすぐな短管**（長さは点の約 3 倍）。管どうしは離れ、伸び続けない |
+| IV_B | **帯の中の点はほぼすべて**、3 点が 1 か所でつながった **Y 字**か、Y が 2 つ程度つながった小さな樹。輪を作らず、有限の大きさで止まる |
+| IV_V | Y どうしが閉じて紫の網になり、**赤い点（粘膜）が I と同じ間隔・ほぼ同じ径で残る**。すなわち **I の明暗反転** |
+
+- 紫の太さは全帯で同じ。変わるのはつながり方（点 → 短管 → Y → 網）だけ。
+- **各帯はその形態だけで模様を作る**。I の点が IIIL・IV_B の帯に多く混ざるのは不合格。隣の形態が混ざってよいのは帯の境界（移行領域）だけ。
+- IV_V の正解像は、旧版で書いた「スライド 6 中央の迷路相」ではなく、上記の明暗反転（スライド 6 では左端にあたる）とする。以下の節で IV_V を「迷路／脳回網」と書いている箇所は、この定義で読み替える。
+
+参照（pptx スライド 6）:
 
 ![反応拡散スイープによる連続遷移の参照](images/goal_rd_sweep_i_to_iv.png)
 
-*参照: `serrated_pitpattern.pptx` スライド 6。左の規則的な点（I）から、短管（IIIL）・短い分岐（IV_B）を経て、中央の幅ほぼ一定の迷路／脳回網（IV_V）へ。**IV_V の正解像はこの中央の迷路相**であり、平行ストライプではない。*
+*参照: `serrated_pitpattern.pptx` スライド 6。**右端**が赤地に紫の規則的な点（I）、**左端**が紫地に赤い点（I の明暗反転 ＝ IV_V の正解像）。中ほどでは紫の管が伸び続けて長いストライプ・迷路になっており、ここが目標と違う点である（旧版の説明は左右を取り違えていた）。太さ・間隔・並び方・質感は理想的。*
+
+旧版の合成ターゲット（線幅一定、参考として残す）:
+
+![合成ターゲット（旧版）](images/goal_target_sweep.png)
+
+*`make goal-figures` による旧版の見本。IV_V を密な網目として描いている。*
 
 ---
 
@@ -352,7 +371,7 @@ IV_B の **同時条件**（最重要）:
 IV_V の **同時条件**:
 
 ```text
-  ✓  IV_B より連結が進み、迷路／脳回網に見える（スライド 6 中央に近い）
+  ✓  IV_B より連結が進み、紫の網に赤い点が規則的に残る（I の明暗反転・答案見本の右端）
   ✓  IV_B からの連続到達である
   ✓  特徴幅の暴走がない（median / p90 の上限を守る）
   ✓  背景が完全塗りつぶしではなく、畝が島として残る
@@ -385,7 +404,9 @@ IIIL は I よりやや大きくてよい。IV_B は短い分岐してよい。I
 - [ ] IIIL で pit が「やや大きい」が、巨大 blob / 横断線にならない
 - [ ] IV_B で分岐（短い樹状）が見える
 - [ ] IV_B で最長成分が視野を支配しない（有限長の単位が複数）
-- [ ] IV_V が IV_B の先として見え、**幅一定の迷路／脳回網**である（平行 stripe だけではない）
+- [ ] IV_V が IV_B の先として見え、**幅一定の網に粘膜の点が規則的に残る I の明暗反転**である（平行 stripe・迷路だけではない）
+- [ ] **帯の純度**: IIIL の帯はほぼ短管だけ、IV_B の帯はほぼ Y 字と小さな樹だけで模様を作る（I の点の混入は境界の移行領域に限る）
+- [ ] **単位の有限性**: IIIL の短管、IV_B の Y・樹が、パラメータを進めても時間がたっても伸び続けない
 - [ ] 各段階で `feature_width_median / w₀ ≤ 1.5`（IV では加えて `feature_width_p90 / w₀ ≤ 2.0`）
 - [ ] 十分長い時間のあとでも、上記がおおむね保たれる
 
@@ -393,7 +414,7 @@ IIIL は I よりやや大きくてよい。IV_B は短い分岐してよい。I
 
 - [ ] 隣接 Type 間の中間 \(p\) で中間形態が見える
 - [ ] skeleton 上で赤い 3 股が、IV_B で **複数成分に分散**している
-- [ ] 合成ターゲット（`goal_target_sweep.png`）および pptx 参照（`goal_rd_sweep_i_to_iv.png`）と同様に、**幅ほぼ一定・位相が変わる**遷移に見える
+- [ ] 答案見本（`pit_ideal_sweep.png`）と同様に、**幅・間隔ほぼ一定・つながり方だけが変わる**遷移に見える
 - [ ] 臨床参照（`goal_clinical_ivb_ivv.png`）の複雑さが、シミュレーションでも言い分けられる
 
 ### 今は必須にしない（Out of scope for this goal）
@@ -434,9 +455,11 @@ IIIL は I よりやや大きくてよい。IV_B は短い分岐してよい。I
 | ファイル | 内容 |
 |----------|------|
 | [`serrated_pitpattern.pptx`](serrated_pitpattern.pptx) | 鋸歯状 pit の整理。スライド 6 が主系列の連続性、スライド 3 が IV_B / IV_V |
-| [`images/goal_target_sweep.png`](images/goal_target_sweep.png) | **答案見本**: 線幅一定の合成スイープ（まずこれと見比べる） |
+| [`images/pit_ideal_sweep.png`](images/pit_ideal_sweep.png) | **答案見本（2026-10-10〜）**: スライド 6 の太さ・間隔のまま、単位が伸び続けないスイープ（まずこれと見比べる）。比較図 [`pit_ideal_sweep_compare.png`](images/pit_ideal_sweep_compare.png) |
+| [`images/goal_target_sweep.png`](images/goal_target_sweep.png) | 旧版の答案見本（線幅一定の合成スイープ） |
 | [`images/goal_schematic_i_iiil_ivb_ivv.png`](images/goal_schematic_i_iiil_ivb_ivv.png) | I / IIIL / IV_B / IV_V の模式（線幅一定・IV_V は迷路網） |
-| [`images/goal_rd_sweep_i_to_iv.png`](images/goal_rd_sweep_i_to_iv.png) | RD スイープ参照（IV_V = 中央の幅一定 labyrinth） |
+| [`images/goal_rd_sweep_i_to_iv.png`](images/goal_rd_sweep_i_to_iv.png) | RD スイープ参照。右端 = I、左端 = I の明暗反転（IV_V の正解像）。中ほどの伸び続けるストライプは目標外 |
+| [`images/pit_reference_sheet.png`](images/pit_reference_sheet.png) | 手元の実画像（工藤分類表・鋸歯状病変）の参照シート |
 | [`images/goal_clinical_ivb_ivv.png`](images/goal_clinical_ivb_ivv.png) | 臨床写真: 鋸 IV_B / IV_V |
 | [`images/anti_goal_parallel_stripes.png`](images/anti_goal_parallel_stripes.png) | 反例: 平行ストライプ（偽 IV_V） |
 | [`images/anti_goal_dashes.png`](images/anti_goal_dashes.png) | 反例: 分岐なし断片 |
@@ -450,6 +473,7 @@ IIIL は I よりやや大きくてよい。IV_B は短い分岐してよい。I
 |----------|------|
 | [`images/goal_all_results_one_page.png`](images/goal_all_results_one_page.png) | 現行空間勾配モデルの 1 枚サマリー |
 | [`images/goal_sweep_sim_i_iiil_ivb_ivv.png`](images/goal_sweep_sim_i_iiil_ivb_ivv.png) | 現行独立 p スイープ contact sheet |
+| [`images/pit_groove_sequence.png`](images/pit_groove_sequence.png), [`images/pit_groove_labels.png`](images/pit_groove_labels.png) | 畝–溝モデル（2026-10-10）: 独立初期化 20 seed のラベル比率と代表形態。解説は [`pit_groove_model.md`](pit_groove_model.md) |
 
 これらは **ゴールではなく実績**である。合否判定の基準画像には使わない。  
 解釈・改善の議論は [`pit_progression_model.md`](pit_progression_model.md) に置く。
