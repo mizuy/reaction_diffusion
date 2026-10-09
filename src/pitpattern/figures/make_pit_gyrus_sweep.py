@@ -83,7 +83,16 @@ def main() -> None:
     ap.add_argument("--arm-len", type=float, default=24.0, help="IV_B arm length (px)")
     ap.add_argument("--villous-area", type=float, default=0.35, help="area per crypt in villous / Branch")
     ap.add_argument("--fork", type=float, default=0.12, help="fork probability per step in gyrus")
-    ap.add_argument("--maze-steps", type=int, default=80, help="Swift-Hohenberg steps for the gyrus maze (0 = off)")
+    ap.add_argument("--maze-steps", type=int, default=100, help="Swift-Hohenberg steps for the gyrus maze (0 = off)")
+    ap.add_argument("--blend", choices=["continuous", "patchy"], default="continuous")
+    ap.add_argument("--m-from", type=float, default=2.2)
+    ap.add_argument("--m-gain", type=float, default=3.0)
+    ap.add_argument("--h-from", type=float, default=3.0)
+    ap.add_argument("--h-gain", type=float, default=1.6)
+    ap.add_argument("--pin", type=float, default=0.15)
+    ap.add_argument("--g-villous", type=float, default=0.0, help="quadratic term at full villous (field method)")
+    ap.add_argument("--g-from", type=float, default=3.0)
+    ap.add_argument("--g-gain", type=float, default=1.2)
     ap.add_argument("--seg-short", type=float, default=1.0, help="maze segment length at gyrus onset (units of D)")
     ap.add_argument("--seg-long", type=float, default=6.0, help="maze segment length just before cuts stop (units of D)")
     ap.add_argument("--cut-until", type=float, default=3.3, help="no cuts beyond this q (long maze into villous)")
@@ -366,11 +375,31 @@ def main() -> None:
         lin = a.maze_r - (1 - K2 / k0 ** 2) ** 2
         dt = 0.3
         den = 1 - dt * (lin - 1)
-        u0 = 2 * cv2.GaussianBlur(field, (0, 0), 2.0) - 1
-        u0 -= cv2.GaussianBlur(u0, (0, 0), D)        # remove the local mean: stripes nucleate in empty red too
-        u = 0.8 * u0 / max(np.abs(u0).max(), 1e-6) + 0.15 * rng.normal(size=u0.shape)
-        for _ in range(a.maze_steps):
-            u = np.fft.ifft2((np.fft.fft2(u) + dt * np.fft.fft2(u - u ** 3 + a.maze_g * u * u)) / den).real
+        qx = q_of(np.arange(Wb, dtype=float))
+        if a.blend == "continuous":
+            # one field for Branch -> Gyrus -> Villous: the relaxation rate m(x) rises from 0
+            # (trees kept) to 1 (equal-spacing maze); towards Villous a pinning h(x) pulls the
+            # same field onto the honeycomb network drawn there.
+            m_x = smooth(a.m_gain * (qx - a.m_from))[None, :]
+            h_x = smooth(a.h_gain * (qx - a.h_from))[None, :]
+            T = 2 * cv2.GaussianBlur(field, (0, 0), 1.5) - 1
+            u0 = 2 * cv2.GaussianBlur(field, (0, 0), 2.0) - 1
+            u0 = u0 - m_x * (1 - h_x) * cv2.GaussianBlur(u0, (0, 0), D)
+            u = u0 + 0.15 * m_x * (1 - h_x) * rng.normal(size=u0.shape)
+            # optional: a quadratic term growing towards Villous turns the maze into a network
+            # of red islands within the same field (labyrinth -> hexagonal islands)
+            g_x = a.g_villous * smooth(a.g_gain * (qx - a.g_from))[None, :]
+            for _ in range(a.maze_steps):
+                u_sh = np.fft.ifft2((np.fft.fft2(u) + dt * np.fft.fft2(u - u ** 3 + a.maze_g * u * u)) / den).real
+                if a.g_villous:
+                    u_sh = u_sh + dt * g_x * u * u
+                u = u + np.maximum(m_x, h_x) * (u_sh - u) + a.pin * h_x * (T - u)
+        else:
+            u0 = 2 * cv2.GaussianBlur(field, (0, 0), 2.0) - 1
+            u0 -= cv2.GaussianBlur(u0, (0, 0), D)        # remove the local mean: stripes nucleate in empty red too
+            u = 0.8 * u0 / max(np.abs(u0).max(), 1e-6) + 0.15 * rng.normal(size=u0.shape)
+            for _ in range(a.maze_steps):
+                u = np.fft.ifft2((np.fft.fft2(u) + dt * np.fft.fft2(u - u ** 3 + a.maze_g * u * u)) / den).real
         thr = np.quantile(u, 1 - a.maze_cover) if a.maze_cover > 0 else 0.0   # 0: zero level
         maze = (u > thr).astype(np.float32)
         maze = cv2.erode(maze, np.ones((2, 2), np.uint8)) if a.maze_cover > 0.5 else maze
@@ -386,7 +415,8 @@ def main() -> None:
         # short -> long maze: cut the centreline at points whose spacing grows with q, leaving a
         # red gap of the Type I width (gap + line width) at every cut
         qx_ = q_of(np.arange(Wb, dtype=float))
-        seg_len = np.where(qx_ < a.cut_until, np.interp(qx_, [2.4, a.cut_until], [a.seg_short, a.seg_long]) * D, np.inf)
+        seg_len = np.where((qx_ < a.cut_until) & (qx_ > 2.3), np.maximum(np.interp(qx_, [2.4, a.cut_until], [a.seg_short, a.seg_long]), 0.5) * D, np.inf)
+        _unused = np.where(qx_ < a.cut_until, np.interp(qx_, [2.4, a.cut_until], [a.seg_short, a.seg_long]) * D, np.inf)
         r_cut = 0.5 * ((D - dot_d) + line_w)
         pts_ = np.argwhere(sk)
         rng.shuffle(pts_)
@@ -409,8 +439,13 @@ def main() -> None:
             for sy in (-Hb, 0, Hb):
                 cv2.circle(mm, (int((x_ + 0.5) * ss), int((y_ + 0.5 + sy) * ss)), int(line_w / 2 * ss), 1, -1)
         maze = cv2.resize(mm.astype(np.float32), (Wb, Hb), interpolation=cv2.INTER_AREA)
-        qx = q_of(np.arange(Wb, dtype=float))
-        wx = smooth(2.0 * (qx - 2.5)) * (1 - smooth(1.6 * (qx - 3.05)))
+        if a.blend == "continuous":
+            act = np.maximum(m_x, h_x)
+            keep = (act < 0.02) | (h_x > 0.98)                 # untouched trees / pure honeycomb
+            field = np.where(np.broadcast_to(keep, field.shape), field, maze)
+            qx = None
+        wx = None if qx is None else smooth(2.0 * (qx - 2.5)) * (1 - smooth(1.6 * (qx - 3.05)))
+    if a.maze_steps > 0 and wx is not None:
         # crisp patchy switch (no semi-transparent ghosting): each region takes one pattern
         noise = cv2.GaussianBlur(rng.random((Hb, Wb)).astype(np.float32), (0, 0), D * 0.6)
         noise = (noise - noise.min()) / (noise.max() - noise.min())
