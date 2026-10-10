@@ -101,7 +101,8 @@ Type II / II-L / II-O、III_H、IV_H（シダの葉・松毬様）、Type VI / V
 
 | ファイル | 内容 |
 |---|---|
-| [`pit_crypt_model.md`](models/pit_crypt_model.md) | **陰窩分葉モデル**（2026-10-10）: 旧答案見本（`pit_ideal_sweep.png`）の 4 帯を独立初期化 20 seed × 12 点で再現。価数の変化は仮定 |
+| [`pit_mouth_model.md`](models/pit_mouth_model.md) | **陰窩口モデル**（2026-10-10）: 現行の答案見本の 5 段階を独立初期化 20 seed × 15 点で再現（各点 19/20 以上）。係数の \(p\) 依存は仮定。Gyrus は見本より短く分岐が多い |
+| [`pit_crypt_model.md`](models/pit_crypt_model.md) | 陰窩分葉モデル（2026-10-10）: 旧答案見本（`pit_ideal_sweep.png`）の 4 帯を独立初期化 20 seed × 12 点で再現。価数の変化は仮定 |
 | [`pit_groove_model.md`](models/pit_groove_model.md) | 畝–溝モデル（2026-10-10）の結果と限界 |
 | [`images/pit_model_comparison.png`](images/pit_model_comparison.png) | これまでの候補モデル 9 種の比較 |
 | [`images/goal_all_results_one_page.png`](images/goal_all_results_one_page.png) | 空間勾配モデルのサマリー（[`pit_progression_model.md`](models/pit_progression_model.md)） |

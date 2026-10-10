@@ -13,7 +13,8 @@
 
 | 文書 | 内容 |
 |---|---|
-| [`models/pit_crypt_model.md`](models/pit_crypt_model.md) | **陰窩分葉モデル**（2026-10-10、現在の到達点）。答案見本の 4 帯を独立初期化 20 seed で再現 |
+| [`models/pit_mouth_model.md`](models/pit_mouth_model.md) | **陰窩口モデル**（2026-10-10、現在の到達点）。現行の答案見本の 5 段階を独立初期化 20 seed × 15 点で再現 |
+| [`models/pit_crypt_model.md`](models/pit_crypt_model.md) | 陰窩分葉モデル（2026-10-10）。旧答案見本の 4 帯を独立初期化 20 seed で再現 |
 | [`models/pit_groove_model.md`](models/pit_groove_model.md) | 畝–溝モデル（2026-10-10、旧ゴール定義での到達点）。捨てた候補の一覧と比較図も含む |
 | [`models/pit_microphase_results.md`](models/pit_microphase_results.md) | 非局所相分離（Ohta–Kawasaki 型）モデルの四形態系列 |
 | [`models/pit_microphase_high_m_results.md`](models/pit_microphase_high_m_results.md) | 同モデルで m を増やしたときの IV_V と反転 spot |

@@ -2,6 +2,7 @@ PYTHON = uv run python
 SRC = src/pitpattern
 
 .PHONY: setup test target-figures model-comparison \
+	pit-mouth-explore pit-mouth-validate pit-mouth-sweep pit-mouth-figures mouth-gui \
 	pit-crypt-explore pit-crypt-validate pit-crypt-sweep pit-crypt-figures crypt-gui \
 	pit-groove-explore pit-groove-validate \
 	goal-figures voronoi cpm particles figueiredo buckling \
@@ -26,6 +27,26 @@ target-figures:
 
 model-comparison:
 	${PYTHON} ${SRC}/figures/make_model_comparison.py
+
+# ---------------------------------------------------------------- crypt-mouth model (docs/models/pit_mouth_model.md)
+MOUTH_PS = 0.1 0.2 0.3 0.8 1.0 1.2 1.8 2.0 2.2 3.0 3.1 3.2 3.6 3.8 4.0
+MOUTH_EXPLORE_PS = 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 1.0 1.2 1.4 1.5 1.6 1.8 2.0 2.2 2.4 2.5 2.6 2.7 2.8 2.9 3.0 3.1 3.2 3.3 3.4 3.5 3.6 3.7 3.8 3.9 4.0
+
+pit-mouth-explore:
+	for s in 1 7 42; do ${PYTHON} ${SRC}/models/simulate_pit_mouth.py scan --output artifacts/pit_mouth/explore/seed$${s}_all --seeds $$s --ps ${MOUTH_EXPLORE_PS} --holds 1 2 5; done
+
+pit-mouth-validate:
+	for s in $$(seq 100 119); do ${PYTHON} ${SRC}/models/simulate_pit_mouth.py scan --output artifacts/pit_mouth/validation/seed$$s --seeds $$s --ps ${MOUTH_PS} --holds 1 2 5; done
+	${PYTHON} ${SRC}/evaluation/evaluate_pit_mouth.py 'artifacts/pit_mouth/validation/seed*/metrics.csv' --json artifacts/pit_mouth/validation/summary.json
+
+pit-mouth-sweep:
+	${PYTHON} ${SRC}/models/simulate_pit_mouth.py sweep --output artifacts/pit_mouth/sweep --seed 1
+
+pit-mouth-figures:
+	${PYTHON} ${SRC}/figures/make_pit_mouth_figures.py
+
+mouth-gui:
+	${PYTHON} -m pitpattern.apps.mouth_gui
 
 # ---------------------------------------------------------------- crypt lobulation model (docs/models/pit_crypt_model.md)
 CRYPT_PS = 0.1 0.2 0.3 0.8 0.9 1.0 2.2 2.3 2.4 3.0 3.2 3.4
