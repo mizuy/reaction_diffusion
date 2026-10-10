@@ -2,14 +2,15 @@
 """Answer-image candidate: Round -> Elongated -> Branch -> Gyrus -> Villous (drawn target).
 
 Progression q(x) rises smoothly from 0 (left) to 4 (right).  One crypt = one pit unit;
-the red gap between pit grooves stays the Type I gap everywhere.
+the red gap between pit grooves stays the Type I gap up to Branch and widens from Gyrus on.
   q 0-1  Round -> Elongated   a dot grows into a straight tube
   q 1-2  Elongated -> Branch  a third arm sprouts, the tube opens into a Y (one fork)
   q 2-3  Branch -> Gyrus      the Y arms keep growing tip-wise, turning and occasionally
-                              forking, always keeping the gap D from every other groove,
-                              until the grooves fill space as a winding gyrus pattern
-  q 3-4  Gyrus -> Villous     groove tips bridge the red ridges to the neighbouring groove,
-                              cutting the ridges into islands (villi)
+                              forking; a Swift-Hohenberg relaxation then joins them into long,
+                              smooth, winding grooves whose pitch widens slowly (D -> 1.25 D)
+  q 3-4  Gyrus -> Villous     within the same field the pitch widens to the honeycomb spacing
+                              and a quadratic term breaks the red ridges into elongated
+                              islands, which round up and lock onto the honeycomb (villi)
 Crypt positions/orientations for q <= 2 come from the constant-gap relaxation of
 make_pit_grade_sweep; growth is a self-avoiding tip growth with a length budget that
 increases with q.  This is a drawn target, not a simulation of tissue.
@@ -83,19 +84,25 @@ def main() -> None:
     ap.add_argument("--arm-len", type=float, default=24.0, help="IV_B arm length (px)")
     ap.add_argument("--villous-area", type=float, default=0.35, help="area per crypt in villous / Branch")
     ap.add_argument("--fork", type=float, default=0.12, help="fork probability per step in gyrus")
-    ap.add_argument("--maze-steps", type=int, default=100, help="Swift-Hohenberg steps for the gyrus maze (0 = off)")
+    ap.add_argument("--maze-steps", type=int, default=180, help="Swift-Hohenberg steps for the gyrus maze (0 = off)")
     ap.add_argument("--blend", choices=["continuous", "patchy"], default="continuous")
     ap.add_argument("--m-from", type=float, default=2.2)
     ap.add_argument("--m-gain", type=float, default=3.0)
-    ap.add_argument("--h-from", type=float, default=3.0)
+    ap.add_argument("--h-from", type=float, default=3.25)
     ap.add_argument("--h-gain", type=float, default=1.6)
-    ap.add_argument("--pin", type=float, default=0.15)
-    ap.add_argument("--g-villous", type=float, default=0.0, help="quadratic term at full villous (field method)")
-    ap.add_argument("--g-from", type=float, default=3.0)
+    ap.add_argument("--pin", type=float, default=0.25)
+    ap.add_argument("--g-villous", type=float, default=-1.5, help="quadratic term at full villous (< 0: red islands)")
+    ap.add_argument("--lam-from", type=float, default=2.7, help="q where the groove pitch starts to widen")
+    ap.add_argument("--lam-gyrus", type=float, default=1.25, help="groove pitch at full gyrus (units of D)")
+    ap.add_argument("--lam-villous", type=float, default=0.0, help="groove pitch at villous (units of D); 0 = honeycomb row spacing")
+    ap.add_argument("--q-knots", type=float, nargs=4, default=[0.57, 0.73, 0.92, 1.0],
+                    help="u where q reaches 3, leaves 3, reaches 4, ends")
+    ap.add_argument("--no-honeycomb", action="store_true", help="never paste the drawn honeycomb; villous comes from the field")
+    ap.add_argument("--g-from", type=float, default=2.95)
     ap.add_argument("--g-gain", type=float, default=1.2)
     ap.add_argument("--seg-short", type=float, default=1.0, help="maze segment length at gyrus onset (units of D)")
     ap.add_argument("--seg-long", type=float, default=6.0, help="maze segment length just before cuts stop (units of D)")
-    ap.add_argument("--cut-until", type=float, default=3.3, help="no cuts beyond this q (long maze into villous)")
+    ap.add_argument("--cut-until", type=float, default=2.9, help="no cuts beyond this q (long maze into villous)")
     ap.add_argument("--maze-g", type=float, default=0.0, help="quadratic term (favours junctions)")
     ap.add_argument("--maze-r", type=float, default=0.3, help="Swift-Hohenberg control parameter")
     ap.add_argument("--maze-cover", type=float, default=0.0, help="purple fraction of the maze (groove width / spacing)")
@@ -110,7 +117,7 @@ def main() -> None:
 
     def q_of(x):
         u = (x - pad) / Wv
-        return np.interp(u, [0.0, 0.03, 0.20, 0.23, 0.31, 0.43, 0.54, 0.68, 0.88, 1.0],
+        return np.interp(u, [0.0, 0.03, 0.20, 0.23, 0.31, 0.43, *a.q_knots],
                          [0, 0, 1, 1, 2, 2, 3, 3, 4, 4])
 
     def expand(qq):
@@ -376,6 +383,13 @@ def main() -> None:
         dt = 0.3
         den = 1 - dt * (lin - 1)
         qx = q_of(np.arange(Wb, dtype=float))
+        # groove pitch lam(x): D up to the gyrus onset, lam_gyrus at full gyrus, the honeycomb
+        # row spacing at villous.  The step is a blend of three constant-pitch steps.
+        lam_v = a.lam_villous * D if a.lam_villous > 0 else 1.5 * b
+        levels = np.array([D, max(a.lam_gyrus * D, D + 1e-3), max(lam_v, a.lam_gyrus * D + 2e-3)])
+        lam_x = np.interp(qx, [a.lam_from, 3.0, 4.0], levels)
+        dens = [1 - dt * (a.maze_r - (1 - K2 / (2 * np.pi / L_) ** 2) ** 2 - 1) for L_ in levels]
+        wts = [np.interp(lam_x, levels, np.eye(3)[i])[None, :] for i in range(3)]
         if a.blend == "continuous":
             # one field for Branch -> Gyrus -> Villous: the relaxation rate m(x) rises from 0
             # (trees kept) to 1 (equal-spacing maze); towards Villous a pinning h(x) pulls the
@@ -390,9 +404,8 @@ def main() -> None:
             # of red islands within the same field (labyrinth -> hexagonal islands)
             g_x = a.g_villous * smooth(a.g_gain * (qx - a.g_from))[None, :]
             for _ in range(a.maze_steps):
-                u_sh = np.fft.ifft2((np.fft.fft2(u) + dt * np.fft.fft2(u - u ** 3 + a.maze_g * u * u)) / den).real
-                if a.g_villous:
-                    u_sh = u_sh + dt * g_x * u * u
+                F = np.fft.fft2(u) + dt * np.fft.fft2(u - u ** 3 + (a.maze_g + g_x) * u * u)
+                u_sh = sum(w_ * np.fft.ifft2(F / d_).real for w_, d_ in zip(wts, dens))
                 u = u + np.maximum(m_x, h_x) * (u_sh - u) + a.pin * h_x * (T - u)
         else:
             u0 = 2 * cv2.GaussianBlur(field, (0, 0), 2.0) - 1
@@ -441,7 +454,7 @@ def main() -> None:
         maze = cv2.resize(mm.astype(np.float32), (Wb, Hb), interpolation=cv2.INTER_AREA)
         if a.blend == "continuous":
             act = np.maximum(m_x, h_x)
-            keep = (act < 0.02) | (h_x > 0.98)                 # untouched trees / pure honeycomb
+            keep = (act < 0.02) | ((h_x > 0.98) & (not a.no_honeycomb))   # untouched trees / pure honeycomb
             field = np.where(np.broadcast_to(keep, field.shape), field, maze)
             qx = None
         wx = None if qx is None else smooth(2.0 * (qx - 2.5)) * (1 - smooth(1.6 * (qx - 3.05)))
@@ -475,7 +488,7 @@ def main() -> None:
     d.text((20, 12), "答案見本の候補: Round → Elongated → Branch → Gyrus → Villous", fill="black", font=font(20, True))
     d.text((20, 46), "現在の答案見本", fill="#52514e", font=font(14))
     sheet.paste(target, (20, 66))
-    d.text((20, 72 + Hv), "候補: 点 → 短管 → Y → 腕が伸び分岐して脳回状に空間を埋める → 溝が畝をまたいでつながり絨毛状の島に（赤い隙間は一定）",
+    d.text((20, 72 + Hv), "候補: 点 → 短管 → Y → 腕が伸びてつながり長い脳回状の溝に → 畝が島に切れて絨毛状に（隙間は Gyrus から徐々に広がる）",
            fill="#52514e", font=font(14))
     sheet.paste(Image.fromarray(rgb), (20, 92 + Hv))
     for cx_, nm in zip((0.03, 0.22, 0.40, 0.63, 0.90), ("Round (I)", "Elongated (IIIL)", "Branch (IV_B)", "Gyrus", "Villous (IV_V)")):
