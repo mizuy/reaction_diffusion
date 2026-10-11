@@ -2,7 +2,7 @@ PYTHON = uv run python
 SRC = src/pitpattern
 
 .PHONY: setup test target-figures model-comparison \
-	pit-mouth-explore pit-mouth-validate pit-mouth-sweep pit-mouth-figures mouth-gui \
+	pit-mouth-explore pit-mouth-validate pit-mouth-sweep pit-mouth-figures mouth-gui mouth-live pit-mouth-live-ramp \
 	pit-crypt-explore pit-crypt-validate pit-crypt-sweep pit-crypt-figures crypt-gui \
 	pit-groove-explore pit-groove-validate \
 	goal-figures voronoi cpm particles figueiredo buckling \
@@ -47,6 +47,12 @@ pit-mouth-figures:
 
 mouth-gui:
 	${PYTHON} -m pitpattern.apps.mouth_gui
+
+mouth-live:
+	${PYTHON} -m pitpattern.apps.mouth_live_gui
+
+pit-mouth-live-ramp:
+	${PYTHON} -m pitpattern.models.pit_mouth_live
 
 # ---------------------------------------------------------------- crypt lobulation model (docs/models/pit_crypt_model.md)
 CRYPT_PS = 0.1 0.2 0.3 0.8 0.9 1.0 2.2 2.3 2.4 3.0 3.2 3.4

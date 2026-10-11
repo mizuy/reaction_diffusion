@@ -56,7 +56,17 @@ def periodic_label(mask: np.ndarray, connectivity: int = 8):
     return lab, np.bincount(lab.ravel(), minlength=len(uniq))
 
 
-def measure(binary: np.ndarray, cfg) -> dict[str, float]:
+def window_label(mask: np.ndarray, connectivity: int = 8):
+    """Components of a non-periodic window -> (labels, areas, touches the border)."""
+    n, lab = cv2.connectedComponents(mask.astype(np.uint8), connectivity=connectivity)
+    edge = np.zeros(n, bool)
+    for line in (lab[0], lab[-1], lab[:, 0], lab[:, -1]):
+        edge[np.unique(line)] = True
+    return lab, np.bincount(lab.ravel(), minlength=n), edge
+
+
+def measure(binary: np.ndarray, cfg, periodic: bool = True) -> dict[str, float]:
+    """periodic=False: a window cut out of a larger pattern; units cut by the border are not counted."""
     from pitpattern.models.simulate_pit_mouth import centreline
 
     D = cfg.D
@@ -66,32 +76,46 @@ def measure(binary: np.ndarray, cfg) -> dict[str, float]:
         return out | dict(n_components=0, frac_dot=0.0, frac_tube=0.0, frac_y=0.0, elongation_median=0.0,
                           long_groove_fraction=0.0, red_island_fraction=0.0, n_red_islands=0,
                           width_median=0.0, width_p90=0.0, gap_median=0.0, void_max=0.0, largest_purple_fraction=0.0)
-    sk = centreline(binary)
-    lab, area = periodic_label(binary, 8)
+    mode = "wrap" if periodic else "edge"
+    sk = centreline(binary, periodic=periodic)
+    if periodic:
+        lab, area = periodic_label(binary, 8)
+        whole = np.ones(len(area) - 1, bool)
+    else:
+        lab, area, edge = window_label(binary, 8)
+        whole = ~edge[1:]
     n = len(area)
-    cn = crossing_number(np.pad(sk, 2, mode="wrap"))[2:-2, 2:-2]     # 1 at a free end of the centreline
+    cn = crossing_number(np.pad(sk, 2, mode="wrap" if periodic else "constant"))[2:-2, 2:-2]     # 1 at a free end
     ends = np.bincount(lab[sk & (cn == 1)], minlength=n)[1:]
     length = np.bincount(lab[sk], minlength=n)[1:].astype(float)
     pad = 40
-    dist = cv2.distanceTransform(np.pad(binary, pad, mode="wrap").astype(np.uint8), cv2.DIST_L2, 5)[pad:-pad, pad:-pad]
+    dist = cv2.distanceTransform(np.pad(binary, pad, mode=mode).astype(np.uint8), cv2.DIST_L2, 5)[pad:-pad, pad:-pad]
     w = 2 * dist[sk]
     width = float(np.median(w))
     elong = (length + width) / width
     dot = elong < 1.5
     tube = ~dot & (ends == 2) & (length < 3 * D)
     y = (ends == 3) & (length > 1.2 * width) & (length < 5 * D)
-    k = max(1, len(length))
-    out.update(n_components=int(len(length)), frac_dot=float(dot.sum() / k), frac_tube=float(tube.sum() / k),
-               frac_y=float(y.sum() / k), elongation_median=float(np.median(elong)),
+    long_ = length > 6 * D                    # a long groove counts even when the window cuts it
+    dot, tube, y = dot & whole, tube & whole, y & whole
+    k = max(1, int((whole | long_).sum()))
+    out.update(n_components=int((whole | long_).sum()), frac_dot=float(dot.sum() / k), frac_tube=float(tube.sum() / k),
+               frac_y=float(y.sum() / k), elongation_median=float(np.median(elong[whole])) if whole.any() else 0.0,
                long_groove_fraction=float(length[length > 6 * D].sum() / max(length.sum(), 1)),
                width_median=width, width_p90=float(np.percentile(w, 90)),
                largest_purple_fraction=float(area[1:].max() / area[1:].sum()))
     # red: enclosed islands and gaps
-    rlab, rarea = periodic_label(~binary, 4)
-    isl = rarea[1:] < 12 * D * D
+    if periodic:
+        rlab, rarea = periodic_label(~binary, 4)
+        isl = rarea[1:] < 12 * D * D
+    else:
+        rlab, rarea, redge = window_label(~binary, 4)
+        isl = (rarea[1:] < 12 * D * D) & ~redge[1:]
+        if (~redge[1:]).any():                      # islands cut by the border are left out of both sides
+            rarea = rarea * np.concatenate([[True], ~redge[1:] | (rarea[1:] >= 12 * D * D)])
     out.update(red_island_fraction=float(rarea[1:][isl].sum() / rarea[1:].sum()), n_red_islands=int(isl.sum()))
-    rdist = cv2.distanceTransform(np.pad(~binary, pad, mode="wrap").astype(np.uint8), cv2.DIST_L2, 5)[pad:-pad, pad:-pad]
-    rsk = centreline(~binary)
+    rdist = cv2.distanceTransform(np.pad(~binary, pad, mode=mode).astype(np.uint8), cv2.DIST_L2, 5)[pad:-pad, pad:-pad]
+    rsk = centreline(~binary, periodic=periodic)
     out.update(gap_median=float(2 * np.median(rdist[rsk])) if rsk.any() else 0.0, void_max=float(2 * rdist.max()))
     return out
 

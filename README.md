@@ -23,7 +23,7 @@ src/pitpattern/
   models/       各候補モデルのシミュレーション（simulate_pit_*.py）
   evaluation/   seed 統計・検証・集計（evaluate_* / validate_* / summarize_*）
   figures/      図の生成（docs/images に出力するもの）
-  apps/         対話ツール（mouth_gui.py: 陰窩口モデルの GUI、crypt_gui.py: 陰窩分葉モデルの GUI）
+  apps/         対話ツール（mouth_live_gui.py: 陰窩口モデルのリアルタイム GUI、mouth_gui.py: 同・独立計算の GUI、crypt_gui.py: 陰窩分葉モデルの GUI）
 tests/          pytest
 docs/           ゴール・評価法・文献、models/・protocols/・concepts/、images/
 legacy/         2019〜2024 の pygame 対話ツール（Gray–Scott の手動探索）
@@ -34,7 +34,8 @@ artifacts/      計算結果（git 管理外。再計算で作り直せる）
 
 ```bash
 # 現行モデル（陰窩分葉モデル）
-make mouth-gui                 # 陰窩口モデルの GUI: p のスライダーで Round (I) → Villous (IV_V)
+make mouth-live                # 陰窩口モデルのリアルタイム GUI: 1 つの状態が p に追従して Round (I) ↔ Villous (IV_V)
+make mouth-gui                 # 陰窩口モデルの GUI: p ごとの独立な計算を切り替えて見る
 make crypt-gui                 # GUI: p のスライダーで模様が変わる
 uv run python -m pitpattern.models.simulate_pit_crypt scan --output artifacts/pit_crypt/try --seeds 1 --ps 0.2 0.9 2.3 3.2
 make pit-mouth-validate        # 陰窩口モデル: 検証 seed 100–119 + 集計（pit-mouth-sweep / pit-mouth-figures も）

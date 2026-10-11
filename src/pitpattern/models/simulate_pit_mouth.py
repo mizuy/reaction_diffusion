@@ -250,10 +250,10 @@ class Field:
         return u
 
 
-def centreline(binary, min_area=0.0):
-    """Skeleton of a periodic binary image; a blob too round to keep a skeleton gives one pixel."""
+def centreline(binary, min_area=0.0, periodic=True):
+    """Skeleton of a (periodic) binary image; a blob too round to keep a skeleton gives one pixel."""
     pad = 24
-    b = np.pad(binary, pad, mode="wrap")
+    b = np.pad(binary, pad, mode="wrap" if periodic else "constant")
     sk = prune_skeleton_spurs(zhang_suen_thin(b), min_length=4).astype(bool)
     n, lab, st, cen = cv2.connectedComponentsWithStats(b.astype(np.uint8), connectivity=8)
     has = np.zeros(n, bool)
